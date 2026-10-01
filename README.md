@@ -3,29 +3,46 @@
 An [Agda](https://agda.readthedocs.io/en/latest/getting-started/what-is-agda.html) extension for [Zed](https://zed.dev). Credits to:
 
 - Tree-sitter: [tree-sitter-agda](https://github.com/tree-sitter/tree-sitter-agda)
-- Language Server: [Agda Language Server](https://github.com/agda/agda-language-server)
+- Interaction protocol: [agda2-vscode](https://github.com/willtunnels/agda2-vscode) (MIT), whose protocol handling the bridge ports to Rust
+
+> **Work in progress.** This branch replaces the Agda Language Server with
+> `agda-bridge`, a small language server in `bridge/` that drives Agda through
+> its own `--interaction-json` protocol, like Emacs `agda2-mode` does. See
+> [`docs/PLAN.md`](docs/PLAN.md) for the design and
+> [`docs/PHASE0.md`](docs/PHASE0.md) for what works so far.
 
 ## Installation
 
-This extension requires both the Agda compiler and the Agda Language Server (ALS) to be installed on your system.
-First, ensure you have the Agda Standard Library and the Language Server installed. I recommend using stack to ensure compatibility with your system's GHC version.
+You need Agda itself, and Rust to build the bridge:
 
 ```sh
-git clone https://github.com/agda/agda-language-server.git
-cd agda-language-server
-stack install
+cargo install --path bridge
 ```
+
+This puts `agda-bridge` in `~/.cargo/bin`, which must be on your `PATH`. Then
+install this repository in Zed with "Install Dev Extension" on the Extensions
+page.
 
 ## Configuration
 
-By default, the extension looks for `als` in your system `PATH`. If you want to use a specific binary, you can configure it in your Zed `settings.json`:
+The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
+`agda` on your `PATH`. Both can be set in Zed's `settings.json`:
 
 ```json
 "lsp": {
-  "als": {
-    "binary": {
-      "path": "/path/to/your/als"
+  "agda-bridge": {
+    "binary": { "path": "/path/to/agda-bridge" },
+    "initialization_options": {
+      "agdaPath": "/path/to/agda",
+      "outputFile": ".zed/agda-output.md"
     }
   }
 }
 ```
+
+`outputFile` is the Markdown file where Agda's answers appear (the equivalent
+of Emacs's `*Agda information*` buffer), relative to the project root. Add it
+to your `.gitignore`.
+
+Emacs-style keybindings are set up through tasks; see the keymap snippet in
+[`docs/PHASE0.md`](docs/PHASE0.md).

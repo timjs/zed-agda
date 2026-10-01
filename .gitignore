@@ -5,3 +5,5 @@ als-Agda-*
 /target
 *.wasm
 tree-sitter-agda/
+/bridge/target
+!/bridge/tests/fixtures/*.agda

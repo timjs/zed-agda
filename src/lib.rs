@@ -1,4 +1,7 @@
-use zed_extension_api::{self as zed, Result, settings::LspSettings};
+use zed_extension_api::{self as zed, Result, serde_json, settings::LspSettings};
+
+/// The language server id in `extension.toml`, and the binary's name.
+const BRIDGE: &str = "agda-bridge";
 
 struct AgdaExtension;
 
@@ -12,37 +15,40 @@ impl zed::Extension for AgdaExtension {
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
+        let binary = LspSettings::for_worktree(BRIDGE, worktree)?.binary;
 
-        let settings = LspSettings::for_worktree("als", worktree)?;
+        // A path in `lsp.agda-bridge.binary.path` wins over `PATH`.
+        let command = binary
+            .as_ref()
+            .and_then(|binary| binary.path.clone())
+            .or_else(|| worktree.which(BRIDGE))
+            .ok_or_else(|| {
+                "agda-bridge was not found. Build it with `cargo install --path bridge` \
+                 from the extension's repository, or set `lsp.agda-bridge.binary.path`."
+                    .to_string()
+            })?;
+        let args = binary
+            .as_ref()
+            .and_then(|binary| binary.arguments.clone())
+            .unwrap_or_default();
 
-        if let Some(binary) = settings.binary {
-            if let Some(binary_path) = binary.path {
-                return Ok(
-                    zed::Command {
-                        command: binary_path,
-                        args: vec![],
-                        env: vec![]
-                    }
-                )
-            }
+        // The shell environment lets the bridge find `agda` the same way a
+        // terminal would, for example in `~/.cabal/bin` or a Nix profile.
+        let mut env = worktree.shell_env();
+        if let Some(extra) = binary.and_then(|binary| binary.env) {
+            env.extend(extra);
         }
 
-        // get where als is located
-        let als_path = worktree
-            .which("als")
-            .ok_or_else(|| format!(
-                "Agda Language Server has not been found. Install it via
-                cabal and set 'binary' settings.json or add it to your PATH"
-            ))?;
+        Ok(zed::Command { command, args, env })
+    }
 
-
-        return Ok(
-            zed::Command {
-                command: als_path,
-                args: vec![],
-                env: vec![],
-            }
-        )
+    fn language_server_initialization_options(
+        &mut self,
+        _language_server_id: &zed::LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> Result<Option<serde_json::Value>> {
+        // Passed through unchanged: `agdaPath`, `extraArgs` and `outputFile`.
+        Ok(LspSettings::for_worktree(BRIDGE, worktree)?.initialization_options)
     }
 }
 

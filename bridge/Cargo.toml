@@ -1,0 +1,18 @@
+[package]
+name = "agda-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Language server that bridges Zed (LSP) and Agda's --interaction-json protocol"
+license = "MIT"
+publish = false
+
+# The bridge is a native program and must not be part of the extension's
+# workspace: Zed compiles the extension crate to wasm32-wasip2, where tokio's
+# process and socket support do not build.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "net", "time", "fs"] }
+tower-lsp-server = "0.23"
