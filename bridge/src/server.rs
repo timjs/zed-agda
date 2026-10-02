@@ -16,6 +16,7 @@ use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
 use crate::agda::Agda;
 use crate::goals::{self, GOAL_MARKER, Goal};
+use crate::highlight::{self, Span};
 use crate::links::{self, Link, Target};
 use crate::output::Output;
 use crate::protocol::{
@@ -70,6 +71,8 @@ struct Document {
     goal_types: HashMap<u32, String>,
     /// Names and their definitions, from the last load's highlighting.
     links: Vec<Link>,
+    /// Agda's highlighting from the last load, for semantic tokens.
+    spans: Vec<Span>,
     /// Errors and warnings from the last load, as diagnostics.
     problems: Vec<Diagnostic>,
     /// The text Agda last loaded, to skip reloading identical text.
@@ -322,6 +325,7 @@ impl Bridge {
             })
             .collect();
         let mut links = links::from_highlighting(&outcome.highlighting, path);
+        let mut spans = highlight::from_highlighting(&outcome.highlighting);
         let file = path.to_string_lossy();
         let mut problems: Vec<Diagnostic> = outcome
             .errors
@@ -345,15 +349,19 @@ impl Bridge {
             if let Some(change) = text::single_change(&snapshot, &document.text) {
                 goals::adjust(&mut goals, &snapshot, &change);
                 links::adjust(&mut links, &change);
+                highlight::adjust(&mut spans, &change);
             }
             document.goals = goals;
             document.links = links;
+            document.spans = spans;
             document.goal_types = outcome.goal_types.clone();
             document.problems = problems;
             document.loaded_text = Some(snapshot);
         }
 
         self.publish(path).await;
+        // Zed asked for tokens when the file opened; ask it to ask again.
+        let _ = self.client.semantic_tokens_refresh().await;
         self.show_output("Load", path, &outcome.markdown()).await;
         let goal_count = outcome.goal_types.len();
         Ok(match outcome.errors.len() {
@@ -457,6 +465,7 @@ impl Bridge {
             let old_text = std::mem::replace(&mut document.text, new_text);
             goals::adjust(&mut document.goals, &old_text, &change);
             links::adjust(&mut document.links, &change);
+            highlight::adjust(&mut document.spans, &change);
 
             // Goals created by the result (`suc ?`) get the ids Agda did not know before.
             if let Some(points) = &outcome.interaction_points {
@@ -663,6 +672,15 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: highlight::legend(),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..SemanticTokensOptions::default()
+                        },
+                    ),
+                ),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
@@ -727,6 +745,7 @@ impl LanguageServer for Backend {
         if let Some(edit) = text::single_change(&document.text, &change.text) {
             goals::adjust(&mut document.goals, &document.text, &edit);
             links::adjust(&mut document.links, &edit);
+            highlight::adjust(&mut document.spans, &edit);
         }
         document.text = change.text;
         document.version = params.text_document.version;
@@ -821,6 +840,24 @@ impl LanguageServer for Backend {
             uri,
             Range::new(at, at),
         ))))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> RpcResult<Option<SemanticTokensResult>> {
+        let Some(path) = path_of(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let documents = self.0.documents.lock().unwrap();
+        let Some(document) = documents.get(&path) else {
+            return Ok(None);
+        };
+        let data = highlight::tokens(&document.spans, &document.text);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 
     async fn code_action(&self, params: CodeActionParams) -> RpcResult<Option<CodeActionResponse>> {

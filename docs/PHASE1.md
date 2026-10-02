@@ -51,17 +51,73 @@ Three details matter, all checked against Agda 2.8.0's real output:
 - Rename and highlighting of all uses of a name (which use the same data) are
   not done yet.
 
+## Done: Agda's own highlighting
+
+The same highlighting messages say, through their `atoms`, what each stretch
+of text is. The bridge sends them to Zed as semantic tokens
+(`bridge/src/highlight.rs`): kinds of names, keywords and comments become
+token types, and problems become modifiers that
+`languages/agda/semantic_token_rules.json` shows as background colours, as in
+Agda's Emacs mode (unsolved metas yellow, termination problems salmon,
+coverage problems wheat, holes light blue, and so on).
+
+Zed uses semantic tokens only when they are switched on, for example with
+`"languages": { "Agda": { "semantic_tokens": "combined" } }` (see the
+README).
+
+### What was learned
+
+1. **Problems arrive as separate entries.** Agda sends `loop` once as a
+   `function` and once, with the same range, as a `terminationproblem`; a
+   coverage problem covers a whole clause such as `partial zero`. Entries
+   with the same range are merged into one token.
+2. **Zed does not combine overlapping tokens of one server.** All of them
+   share one highlight layer (`HighlightKey::SemanticToken` in
+   `crates/editor/src/display_map/custom_highlights.rs`), so an inner token
+   would cancel the outer one where they overlap. The bridge therefore
+   flattens overlapping ranges into pieces that do not overlap: in
+   `partial zero`, `partial` is a function with a coverage problem, the space
+   only has the coverage problem, and `zero` is a constructor with it.
+3. **Rules cannot tell light themes from dark ones.** A rule has one colour,
+   so the backgrounds are agda2-vscode's light theme colours made translucent;
+   your own `semantic_token_rules` in Zed's settings override them.
+4. **Rules apply from low to high priority**: Zed's defaults first, then the
+   extension's, then the user's, each overriding fields of the previous
+   ones, so a modifier rule adds a background on top of the default colour of
+   a `function`.
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| Agda's real highlighting of `Spike.agda` becomes the expected tokens: keyword `data`, type `ℕ`, constructor `suc`, function `_+_`, variable `n`, a hole as a decoration, `𝔹` two UTF-16 units long | passes |
+| After loading, the server asks Zed to request tokens again (`workspace/semanticTokens/refresh`) | passes |
+| Tokens follow an unsaved edit (a new first line moves them down; the new line has none) | passes; fails with the adjustment disabled |
+| In `Problems.agda`, `loop` carries a termination problem in its signature and its recursive call, and the coverage problem over `partial zero` is split into three pieces | passes; fails without the flattening |
+| Every type and modifier in the rules file exists in the bridge's legend, and every decoration has a rule | passes |
+
+### To check in Zed
+
+1. Rebuild the dev extension (the rules file is part of it), reinstall the
+   bridge, and switch semantic tokens on.
+2. Open `bridge/tests/fixtures/Problems.agda` (a copy): `loop` should have a
+   salmon background, the clause `partial zero` a wheat one.
+3. Compare the colours with tree-sitter's, in a light and a dark theme.
+
+### Limitations
+
+- Lines typed since the last save keep only tree-sitter's highlighting (in
+  `combined` mode) until the file is saved and loaded again.
+- The colours are the same in light and dark themes.
+
 ## Next steps
 
-1. **Agda's own highlighting** as semantic tokens, from the same messages
-   (their `atoms`), with background colours for unsolved metas, termination
-   and coverage problems through `semantic_token_rules.json`.
-2. **Unicode input** through completions: `\` with the abbreviations of
+1. **Unicode input** through completions: `\` with the abbreviations of
    Agda's Emacs mode (which include the LaTeX names), and `#` with Typst's
    symbol names from the `codex` crate, only after a space or at the start of
    a line, because pragmas start with `{-#`.
-3. **Goal commands**: a lone `?` becomes `{!  !}` after loading, plus case
+2. **Goal commands**: a lone `?` becomes `{!  !}` after loading, plus case
    split, auto and solve.
-4. **A hover cache**, so hover stays fast during long loads.
-5. Stretch goal: hover showing the type of any name in scope at the top
+3. **A hover cache**, so hover stays fast during long loads.
+4. Stretch goal: hover showing the type of any name in scope at the top
    level.

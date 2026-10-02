@@ -93,6 +93,79 @@ impl Change {
     pub fn delta(&self) -> isize {
         self.new_len as isize - (self.old_end - self.start) as isize
     }
+
+    /// Move the half-open range `start..end` along with this change: shifted
+    /// when the change lies before it, kept when the change lies after it, and
+    /// `None` when the change touches it. An insertion at `start` counts as
+    /// before, an insertion at `end` as after.
+    pub fn follow(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        if self.old_end <= start {
+            let shift = |offset: usize| offset.saturating_add_signed(self.delta());
+            Some((shift(start), shift(end)))
+        } else if self.start >= end {
+            Some((start, end))
+        } else {
+            None
+        }
+    }
+}
+
+/// Fast conversion of many char offsets in one text to LSP positions.
+pub struct LineIndex {
+    /// The char offset at which each line starts.
+    line_starts: Vec<usize>,
+    /// The number of UTF-16 code units before each char, plus one entry for
+    /// the end of the text.
+    utf16_before: Vec<u32>,
+}
+
+impl LineIndex {
+    pub fn new(text: &str) -> LineIndex {
+        let mut line_starts = vec![0];
+        let mut utf16_before = Vec::with_capacity(text.len() + 1);
+        let mut units = 0;
+        for (offset, ch) in text.chars().enumerate() {
+            utf16_before.push(units);
+            units += ch.len_utf16() as u32;
+            if ch == '\n' {
+                line_starts.push(offset + 1);
+            }
+        }
+        utf16_before.push(units);
+        LineIndex {
+            line_starts,
+            utf16_before,
+        }
+    }
+
+    /// The number of chars in the text.
+    pub fn len(&self) -> usize {
+        self.utf16_before.len() - 1
+    }
+
+    /// The LSP position of a char offset, clamped to the end of the text.
+    pub fn position(&self, offset: usize) -> Position {
+        let offset = offset.min(self.len());
+        let line = self.line_starts.partition_point(|&start| start <= offset) - 1;
+        let character = self.utf16_before[offset] - self.utf16_before[self.line_starts[line]];
+        Position::new(line as u32, character)
+    }
+
+    /// The char offset where the line after `line` starts, or the end of the text.
+    pub fn next_line_start(&self, line: u32) -> usize {
+        self.line_starts
+            .get(line as usize + 1)
+            .copied()
+            .unwrap_or(self.len())
+    }
+
+    /// The char offset of the newline ending `line`, or the end of the text.
+    pub fn line_end(&self, line: u32) -> usize {
+        match self.line_starts.get(line as usize + 1) {
+            Some(next) => next - 1,
+            None => self.len(),
+        }
+    }
 }
 
 /// The smallest single change that turns `old` into `new`, found from the
@@ -179,5 +252,37 @@ mod tests {
                 new_len: 0
             })
         );
+    }
+
+    #[test]
+    fn follows_ranges_through_changes() {
+        let insert = |at, len| Change {
+            start: at,
+            old_end: at,
+            new_len: len,
+        };
+        assert_eq!(insert(2, 3).follow(4, 7), Some((7, 10))); // before
+        assert_eq!(insert(4, 3).follow(4, 7), Some((7, 10))); // at the start
+        assert_eq!(insert(7, 3).follow(4, 7), Some((4, 7))); // at the end
+        assert_eq!(insert(5, 3).follow(4, 7), None); // inside
+        let delete = Change {
+            start: 1,
+            old_end: 3,
+            new_len: 0,
+        };
+        assert_eq!(delete.follow(4, 7), Some((2, 5)));
+    }
+
+    #[test]
+    fn indexes_lines_like_position_of() {
+        let index = LineIndex::new(TEXT);
+        assert_eq!(index.len(), TEXT.chars().count());
+        for offset in 0..=TEXT.chars().count() {
+            assert_eq!(index.position(offset), position_of(TEXT, offset));
+        }
+        assert_eq!(index.next_line_start(0), 3);
+        assert_eq!(index.next_line_start(2), TEXT.chars().count());
+        assert_eq!(index.line_end(0), 2);
+        assert_eq!(index.line_end(2), TEXT.chars().count());
     }
 }

@@ -50,5 +50,18 @@ item` (`cmd-shift-t` on macOS, `ctrl-shift-t` on Linux). With
 opening reveal an output file that is already open in another pane, instead of
 opening a second copy.
 
+Agda's own highlighting, including backgrounds for unsolved metas and
+termination or coverage problems, arrives as semantic tokens, which Zed only
+uses when they are switched on:
+
+```json
+"languages": {
+  "Agda": { "semantic_tokens": "combined" }
+}
+```
+
+`combined` keeps the tree-sitter highlighting underneath, for text Agda has not
+seen yet (lines typed since the last save); `full` shows only Agda's.
+
 For debugging, `agda-bridge client` sends a command to the running bridge from
 a terminal; run it without arguments for its usage.

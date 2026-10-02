@@ -26,8 +26,10 @@ struct Client {
 }
 
 impl Client {
-    fn start(agda: &str) -> Client {
+    /// Start the bridge with its debug client socket at `socket`.
+    fn start(socket: &Path) -> Client {
         let mut child = Command::new(env!("CARGO_BIN_EXE_agda-bridge"))
+            .env("AGDA_BRIDGE_SOCKET", socket)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -60,7 +62,6 @@ impl Client {
                 }
             }
         });
-        let _ = agda;
         Client {
             child,
             stdin,
@@ -69,6 +70,22 @@ impl Client {
             received: Vec::new(),
             history: Vec::new(),
         }
+    }
+
+    /// Initialize the server for the worktree `root`, using `agda`.
+    fn initialize(&mut self, root: &Path, agda: &str) -> Value {
+        let init = self.request(
+            "initialize",
+            json!({
+                "processId": null,
+                "rootUri": uri(root),
+                "workspaceFolders": [{ "uri": uri(root), "name": "test" }],
+                "capabilities": { "window": { "showDocument": { "support": true } } },
+                "initializationOptions": { "agdaPath": agda },
+            }),
+        );
+        self.notify("initialized", json!({}));
+        init
     }
 
     fn send(&mut self, message: Value) {
@@ -194,6 +211,18 @@ fn location(uri: &str, line: u32, character: u32) -> Value {
     json!({ "uri": uri, "range": { "start": at, "end": at } })
 }
 
+/// A fresh worktree with copies of the given fixtures.
+fn setup(name: &str, fixtures: &[&str]) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("agda-bridge-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for fixture in fixtures {
+        std::fs::copy(source.join(fixture), root.join(fixture)).unwrap();
+    }
+    root
+}
+
 fn find_agda() -> Option<String> {
     if let Ok(agda) = std::env::var("AGDA") {
         return Some(agda);
@@ -257,33 +286,15 @@ fn drives_agda_through_lsp_and_debug_client() {
         return;
     };
 
-    let root: PathBuf =
-        std::env::temp_dir().join(format!("agda-bridge-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    for name in ["Spike.agda", "Bad.agda", "Nat.agda", "Uses.agda"] {
-        std::fs::copy(fixtures.join(name), root.join(name)).unwrap();
-    }
+    let root = setup("lsp", &["Spike.agda", "Bad.agda", "Nat.agda", "Uses.agda"]);
     let socket = root.join("bridge.sock");
-    // SAFETY: the test sets this before starting any thread that reads it.
-    unsafe { std::env::set_var("AGDA_BRIDGE_SOCKET", &socket) };
 
     let spike = root.join("Spike.agda");
     let spike_uri = uri(&spike);
     let mut text = std::fs::read_to_string(&spike).unwrap();
 
-    let mut client = Client::start(&agda);
-    let init = client.request(
-        "initialize",
-        json!({
-            "processId": null,
-            "rootUri": uri(&root),
-            "workspaceFolders": [{ "uri": uri(&root), "name": "test" }],
-            "capabilities": { "window": { "showDocument": { "support": true } } },
-            "initializationOptions": { "agdaPath": agda },
-        }),
-    );
+    let mut client = Client::start(&socket);
+    let init = client.initialize(&root, &agda);
     assert_eq!(init["capabilities"]["hoverProvider"], true);
     assert!(
         init["capabilities"]["executeCommandProvider"]["commands"]
@@ -291,7 +302,6 @@ fn drives_agda_through_lsp_and_debug_client() {
             .unwrap()
             .contains(&json!("agda.give"))
     );
-    client.notify("initialized", json!({}));
 
     // Opening the file loads it: every goal becomes an Information diagnostic.
     client.notify(
@@ -411,6 +421,7 @@ fn drives_agda_through_lsp_and_debug_client() {
     let column = text.lines().nth(line).unwrap().find("{!").unwrap() + 3;
     let run_client = |command: &str, row: usize, column: usize| {
         Command::new(env!("CARGO_BIN_EXE_agda-bridge"))
+            .env("AGDA_BRIDGE_SOCKET", &socket)
             .args(["client", command, "--root"])
             .arg(&root)
             .arg("--file")
@@ -531,6 +542,153 @@ fn drives_agda_through_lsp_and_debug_client() {
         client.definition(&uses_uri, position_of(&uses_text, "open", 0)),
         Value::Null
     );
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+type Token = (u64, u64, u64, String, Vec<String>);
+
+/// The semantic tokens of `uri`, decoded to absolute
+/// (line, character, length, type, modifiers) with the server's legend.
+fn semantic_tokens(client: &mut Client, uri: &str, legend: &Value) -> Vec<Token> {
+    let result = client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let names = |key: &str| -> Vec<String> {
+        legend[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (types, modifiers) = (names("tokenTypes"), names("tokenModifiers"));
+    let data: Vec<u64> = result["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_u64().unwrap())
+        .collect();
+    let (mut line, mut character) = (0, 0);
+    data.chunks(5)
+        .map(|token| {
+            line += token[0];
+            character = if token[0] == 0 {
+                character + token[1]
+            } else {
+                token[1]
+            };
+            let applied = (0..modifiers.len())
+                .filter(|bit| token[4] & (1 << bit) != 0)
+                .map(|bit| modifiers[bit].clone())
+                .collect();
+            (
+                line,
+                character,
+                token[2],
+                types[token[3] as usize].clone(),
+                applied,
+            )
+        })
+        .collect()
+}
+
+fn token(line: u64, character: u64, length: u64, ty: &str, modifiers: &[&str]) -> Token {
+    (
+        line,
+        character,
+        length,
+        ty.to_string(),
+        modifiers.iter().map(|m| m.to_string()).collect(),
+    )
+}
+
+#[test]
+fn highlights_with_semantic_tokens() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("tokens", &["Spike.agda", "Problems.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    let init = client.initialize(&root, &agda);
+    let legend = init["capabilities"]["semanticTokensProvider"]["legend"].clone();
+    assert_eq!(init["capabilities"]["semanticTokensProvider"]["full"], true);
+
+    // After loading, the server asks the client to request tokens again.
+    let spike = root.join("Spike.agda");
+    let spike_uri = uri(&spike);
+    let text = std::fs::read_to_string(&spike).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": spike_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    client.diagnostics(&spike_uri, |d| d.len() == 3);
+    client.wait_for("refresh", |m| {
+        m["method"] == "workspace/semanticTokens/refresh"
+    });
+
+    let tokens = semantic_tokens(&mut client, &spike_uri, &legend);
+    for expected in [
+        token(2, 0, 4, "keyword", &[]),        // data
+        token(2, 5, 1, "type", &[]),           // ℕ
+        token(4, 2, 3, "enumMember", &[]),     // suc
+        token(6, 0, 3, "function", &[]),       // _+_
+        token(8, 4, 1, "variable", &[]),       // n
+        token(8, 12, 17, "region", &["hole"]), // {! suc (n + m) !}
+        token(13, 5, 2, "type", &[]),          // 𝔹, two UTF-16 units
+    ] {
+        assert!(
+            tokens.contains(&expected),
+            "{expected:?} not in {tokens:#?}"
+        );
+    }
+
+    // Tokens follow an unsaved edit: a new first line moves everything down.
+    let edited = format!("-- note\n{text}");
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": spike_uri, "version": 2 }, "contentChanges": [{ "text": edited }] }),
+    );
+    let tokens = semantic_tokens(&mut client, &spike_uri, &legend);
+    assert!(
+        tokens.contains(&token(3, 0, 4, "keyword", &[])),
+        "{tokens:#?}"
+    );
+    assert!(tokens.contains(&token(3, 5, 1, "type", &[])), "{tokens:#?}");
+    assert!(
+        tokens.iter().all(|t| t.0 != 0),
+        "the new line has no tokens yet"
+    );
+
+    // Problems become modifiers; the coverage problem over a whole clause is
+    // split so that each name keeps its own type.
+    let problems = root.join("Problems.agda");
+    let problems_uri = uri(&problems);
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": problems_uri, "languageId": "agda", "version": 1,
+                                  "text": std::fs::read_to_string(&problems).unwrap() } }),
+    );
+    client.diagnostics(&problems_uri, |d| !d.is_empty());
+    let tokens = semantic_tokens(&mut client, &problems_uri, &legend);
+    for expected in [
+        token(6, 0, 4, "function", &["terminationProblem"]), // loop : …
+        token(7, 0, 4, "function", &[]),                     // loop n = …
+        token(7, 9, 4, "function", &["terminationProblem"]), // … = loop n
+        token(10, 0, 7, "function", &["coverageProblem"]),   // partial
+        token(10, 7, 1, "region", &["coverageProblem"]),     // the space
+        token(10, 8, 4, "enumMember", &["coverageProblem"]), // zero
+    ] {
+        assert!(
+            tokens.contains(&expected),
+            "{expected:?} not in {tokens:#?}"
+        );
+    }
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

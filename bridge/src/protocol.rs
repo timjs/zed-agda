@@ -87,12 +87,15 @@ pub struct Highlighting {
 }
 
 /// One highlighted stretch of the file, as a half-open range of 1-based code
-/// point offsets. Agda also sends `atoms` (what kind of name it is), which the
-/// bridge does not use yet.
+/// point offsets. Its `atoms` say what it is: a kind of name (`function`,
+/// `bound`), a lexical class (`keyword`, `comment`) or a problem
+/// (`unsolvedmeta`, `terminationproblem`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HighlightingEntry {
     pub range: [usize; 2],
+    #[serde(default)]
+    pub atoms: Vec<String>,
     pub definition_site: Option<DefinitionSite>,
 }
 
@@ -309,6 +312,7 @@ mod tests {
         };
         assert_eq!(info.payload.len(), 2);
         assert_eq!(info.payload[0].range, [1, 7]);
+        assert_eq!(info.payload[0].atoms, ["keyword"]);
         assert!(info.payload[0].definition_site.is_none());
         let site = info.payload[1].definition_site.as_ref().unwrap();
         assert_eq!((site.filepath.as_str(), site.position), ("/x/Nat.agda", 24));

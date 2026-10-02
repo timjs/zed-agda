@@ -64,24 +64,21 @@ pub fn from_highlighting(entries: &[HighlightingEntry], file: &Path) -> Vec<Link
 
 /// Move links along with one change to the document.
 pub fn adjust(links: &mut Vec<Link>, change: &Change) {
-    let delta = change.delta();
-    let shift = |offset: usize| offset.saturating_add_signed(delta);
     links.retain_mut(|link| {
         if let Target::Here(target) = &mut link.target {
             if *target >= change.old_end {
-                *target = shift(*target);
+                *target = target.saturating_add_signed(change.delta());
             } else if *target > change.start {
                 // The definition itself was edited; point at the edit.
                 *target = change.start;
             }
         }
-        if change.old_end <= link.start {
-            link.start = shift(link.start);
-            link.end = shift(link.end);
-            true
-        } else {
-            // Kept when entirely after the change, dropped when it touches it.
-            change.start >= link.end
+        match change.follow(link.start, link.end) {
+            Some((start, end)) => {
+                (link.start, link.end) = (start, end);
+                true
+            }
+            None => false,
         }
     });
 }
@@ -103,6 +100,7 @@ mod tests {
     fn entry(range: [usize; 2], site: Option<(&str, usize)>) -> HighlightingEntry {
         HighlightingEntry {
             range,
+            atoms: Vec::new(),
             definition_site: site.map(|(filepath, position)| DefinitionSite {
                 filepath: filepath.into(),
                 position,

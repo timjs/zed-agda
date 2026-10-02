@@ -7,6 +7,7 @@
 
 mod agda;
 mod goals;
+mod highlight;
 mod iotcm;
 mod links;
 mod location;
