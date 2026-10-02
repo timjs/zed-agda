@@ -112,6 +112,23 @@ takes a minute.
    On Linux and Windows `ctrl-c` is also copy, so Zed waits briefly after
    `ctrl-c` for a second key before copying; on macOS there is no conflict.
 
+### Troubleshooting: `Library not loaded: @rpath/libLLVM.dylib` on macOS
+
+If installing the dev extension fails with this error from `rust-lld`, the
+`cargo` on your `PATH` is not rustup's proxy. On macOS, `rust-lld` finds
+`libLLVM.dylib` only through the `DYLD_FALLBACK_LIBRARY_PATH` that rustup's
+proxies set, so running a toolchain's `cargo` directly (for example from
+`~/.rustup/toolchains/stable-aarch64-apple-darwin/bin`) breaks every
+WebAssembly build, including Zed extensions. `rustup run stable cargo build
+--target wasm32-wasip2` confirms it: that command works.
+
+The fix is to put rustup's proxies first on your `PATH` and remove the
+toolchain directory from it. They live in `~/.cargo/bin` for the standard
+installer, and in `$(brew --prefix rustup)/bin` for Homebrew's rustup, which
+is keg-only and links only `rustup` itself into Homebrew's `bin`. Then quit
+Zed completely and reopen it, because Zed reads the shell environment at
+startup.
+
 ### Checklist
 
 Open `bridge/tests/fixtures/Spike.agda` (a copy, so the fixture stays intact)
