@@ -3,13 +3,15 @@
 An [Agda](https://agda.readthedocs.io/en/latest/getting-started/what-is-agda.html) extension for [Zed](https://zed.dev). Credits to:
 
 - Tree-sitter: [tree-sitter-agda](https://github.com/tree-sitter/tree-sitter-agda)
-- Interaction protocol: [agda2-vscode](https://github.com/willtunnels/agda2-vscode) (MIT), whose protocol handling the bridge ports to Rust; see [`bridge/THIRD-PARTY-NOTICES.md`](bridge/THIRD-PARTY-NOTICES.md)
+- Interaction protocol: [agda2-vscode](https://github.com/willtunnels/agda2-vscode) (MIT), whose protocol handling the bridge ports to Rust and whose dump of Agda's input method it uses for Unicode input; see [`bridge/THIRD-PARTY-NOTICES.md`](bridge/THIRD-PARTY-NOTICES.md)
+- Typst symbol names: [codex](https://github.com/typst/codex) (Apache-2.0)
 
 > **Work in progress.** This branch replaces the Agda Language Server with
 > `agda-bridge`, a small language server in `bridge/` that drives Agda through
 > its own `--interaction-json` protocol, like Emacs `agda2-mode` does. See
 > [`docs/PLAN.md`](docs/PLAN.md) for the design and
-> [`docs/PHASE0.md`](docs/PHASE0.md) for what works so far.
+> [`docs/PHASE0.md`](docs/PHASE0.md) and [`docs/PHASE1.md`](docs/PHASE1.md)
+> for what works so far.
 
 ## Installation
 
@@ -62,6 +64,16 @@ uses when they are switched on:
 
 `combined` keeps the tree-sitter highlighting underneath, for text Agda has not
 seen yet (lines typed since the last save); `full` shows only Agda's.
+
+## Unicode input
+
+Type `\` and an abbreviation of Agda's Emacs mode (`\to`, `\all`, `\bN`,
+`\Gl`), or `#` and the name of a [Typst symbol](https://typst.app/docs/reference/symbols/sym/)
+(`#arrow.r`, `#NN`, `#lt.eq`), and pick the symbol from the completion menu
+with `tab` or `enter`. A `#` only starts a Typst name at the start of a line or
+after a space, so pragmas such as `{-# OPTIONS --safe #-}` are left alone.
+
+## Debugging
 
 For debugging, `agda-bridge client` sends a command to the running bridge from
 a terminal; run it without arguments for its usage.

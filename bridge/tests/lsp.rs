@@ -1,8 +1,8 @@
 //! End-to-end test: this file plays Zed's role, a small LSP client, and drives
 //! the real `agda-bridge` binary against a real Agda.
 //!
-//! Agda is taken from `$AGDA`, or `agda` on `PATH`; without it the test is
-//! skipped with a message.
+//! Agda is taken from `$AGDA`, or `agda` on `PATH`; without it the tests that
+//! need it are skipped with a message.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -74,13 +74,22 @@ impl Client {
 
     /// Initialize the server for the worktree `root`, using `agda`.
     fn initialize(&mut self, root: &Path, agda: &str) -> Value {
+        self.initialize_with(
+            root,
+            agda,
+            json!({ "window": { "showDocument": { "support": true } } }),
+        )
+    }
+
+    /// Initialize the server, announcing the client `capabilities`.
+    fn initialize_with(&mut self, root: &Path, agda: &str, capabilities: Value) -> Value {
         let init = self.request(
             "initialize",
             json!({
                 "processId": null,
                 "rootUri": uri(root),
                 "workspaceFolders": [{ "uri": uri(root), "name": "test" }],
-                "capabilities": { "window": { "showDocument": { "support": true } } },
+                "capabilities": capabilities,
                 "initializationOptions": { "agdaPath": agda },
             }),
         );
@@ -689,6 +698,129 @@ fn highlights_with_semantic_tokens() {
             "{expected:?} not in {tokens:#?}"
         );
     }
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn links_cover_whole_names() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("names", &["Names.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    // Zed accepts links, which carry the range of the name.
+    client.initialize_with(
+        &root,
+        &agda,
+        json!({ "textDocument": { "definition": { "linkSupport": true } } }),
+    );
+
+    let names = root.join("Names.agda");
+    let names_uri = uri(&names);
+    let text = std::fs::read_to_string(&names).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": names_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    client.diagnostics(&names_uri, |d| d.is_empty());
+
+    // From the `s` of `~>*step` in `one = ~>*step zero`: the link covers the
+    // whole name, which Zed would otherwise split into `~>*` and `step`, and
+    // leads to its type signature.
+    let at = |line: u32, character: u32| json!({ "line": line, "character": character });
+    let expected = json!([{
+        "originSelectionRange": { "start": at(10, 6), "end": at(10, 13) },
+        "targetUri": names_uri,
+        "targetRange": { "start": at(6, 0), "end": at(6, 0) },
+        "targetSelectionRange": { "start": at(6, 0), "end": at(6, 0) },
+    }]);
+    for needle in ["~>*step zero", "step zero"] {
+        assert_eq!(
+            client.definition(&names_uri, position_of(&text, needle, 0)),
+            expected,
+            "{needle}"
+        );
+    }
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn completes_unicode_input() {
+    // Completions need no Agda, so this test runs without one: loading the
+    // opened file only fails with a warning.
+    let root = setup("input", &[]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    let init = client.initialize(&root, "agda-bridge-test-no-agda");
+    let triggers = init["capabilities"]["completionProvider"]["triggerCharacters"].clone();
+    for c in ["\\", "#", "-", ".", ">"] {
+        assert!(
+            triggers.as_array().unwrap().contains(&json!(c)),
+            "{c} in {triggers}"
+        );
+    }
+
+    let input_uri = uri(&root.join("Input.agda"));
+    let mut text = "id : A \\to\nf : 𝔹 \\bN\n{-#\nx = #arrow.r\n".to_string();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": input_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    let complete = |client: &mut Client, line: u32, character: u32| {
+        client.request(
+            "textDocument/completion",
+            json!({ "textDocument": { "uri": input_uri },
+                    "position": { "line": line, "character": character } }),
+        )
+    };
+
+    // `\to` becomes `→`: the edit replaces the abbreviation and its leader.
+    let result = complete(&mut client, 0, 10);
+    assert_eq!(result["isIncomplete"], false);
+    let first = &result["items"][0];
+    assert_eq!(first["label"], "→");
+    assert_eq!(first["detail"], "\\to");
+    assert_eq!(first["filterText"], "to");
+    assert_eq!(first["documentation"], "U+2192");
+    text = apply(&text, &first["textEdit"]);
+    assert!(text.starts_with("id : A →\n"), "{text}");
+
+    // Columns are UTF-16 units, and `𝔹` takes two of them.
+    let result = complete(&mut client, 1, 10);
+    assert_eq!(result["items"][0]["label"], "ℕ");
+    assert_eq!(
+        result["items"][0]["textEdit"]["range"]["start"],
+        json!({ "line": 1, "character": 7 })
+    );
+
+    // `#` after a space starts a Typst name, but `#` in a pragma does not.
+    let result = complete(&mut client, 3, 12);
+    assert_eq!(result["items"][0]["label"], "→");
+    assert_eq!(result["items"][0]["detail"], "#arrow.r");
+    assert_eq!(complete(&mut client, 2, 3), Value::Null);
+    // Neither does ordinary text.
+    assert_eq!(complete(&mut client, 0, 2), Value::Null);
+
+    // After the edit, as Zed sends it, `→` is not completed again; a lone
+    // leader offers a list that is cut off, so the client must ask again.
+    text.push_str("g = \\\n");
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": input_uri, "version": 2 },
+                "contentChanges": [{ "text": text }] }),
+    );
+    assert_eq!(complete(&mut client, 0, 8), Value::Null);
+    let result = complete(&mut client, 4, 5);
+    assert_eq!(result["isIncomplete"], true);
+    assert!(result["items"].as_array().unwrap().len() <= 200);
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

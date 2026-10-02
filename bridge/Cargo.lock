@@ -6,6 +6,7 @@ version = 4
 name = "agda-bridge"
 version = "0.1.0"
 dependencies = [
+ "codex",
  "serde",
  "serde_json",
  "tokio",
@@ -35,6 +36,12 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "codex"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0732ab1a27b4ea05e6f9f60a5122c9924dd5123defde0d8e907f58cf643d40e6"
 
 [[package]]
 name = "crossbeam-utils"

@@ -4,7 +4,10 @@ Parts of `agda-bridge` are ported from [agda2-vscode](https://github.com/willtun
 the command builders and string quoting (`src/iotcm.rs`), the response types
 and prompt handling (`src/protocol.rs`), goal tracking through edits
 (`src/goals.rs`, `src/text.rs`) and the location parsing (`src/location.rs`).
-Its licence:
+`src/abbreviations.json` is copied unchanged from agda2-vscode (commit
+`3d715e4`), which generates it from Agda's Emacs input method
+(`agda-input.el`, MIT licence); that input method includes the translations of
+the TeX input method of GNU Emacs. The licence of agda2-vscode:
 
 ```text
 MIT License

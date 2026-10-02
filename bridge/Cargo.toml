@@ -12,6 +12,7 @@ publish = false
 [workspace]
 
 [dependencies]
+codex = { version = "0.3.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "net", "time", "fs"] }

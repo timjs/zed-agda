@@ -23,7 +23,7 @@ use crate::protocol::{
     DisplayInfo, GiveResult, GoalInfo, HighlightingEntry, InteractionPoint, Response, message_text,
 };
 use crate::text::{self, Change};
-use crate::{iotcm, location, render};
+use crate::{input, iotcm, location, render};
 
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
@@ -61,6 +61,9 @@ struct Config {
     agda_path: String,
     extra_args: Vec<String>,
     root: Option<PathBuf>,
+    /// Whether the client accepts `LocationLink`s for go to definition, which
+    /// carry the range of the name (Zed underlines it on `cmd`-hover).
+    link_support: bool,
 }
 
 #[derive(Default)]
@@ -610,6 +613,22 @@ impl Bridge {
         )
     }
 
+    /// The answer to go to definition: a link from the name at `origin` to
+    /// `at` in `uri`, or only the target for clients without link support.
+    fn definition(&self, origin: Range, uri: Uri, at: Position) -> GotoDefinitionResponse {
+        let target = Range::new(at, at);
+        if self.config().link_support {
+            GotoDefinitionResponse::Link(vec![LocationLink {
+                origin_selection_range: Some(origin),
+                target_uri: uri,
+                target_range: target,
+                target_selection_range: target,
+            }])
+        } else {
+            GotoDefinitionResponse::Scalar(Location::new(uri, target))
+        }
+    }
+
     /// Report the result of a background operation as a notification.
     async fn report(&self, result: Result<String, String>) {
         if let Err(message) = result {
@@ -652,10 +671,18 @@ impl LanguageServer for Backend {
             (None, None) => std::env::temp_dir().join("agda-output.md"),
         };
         let _ = self.0.output.set(Output::new(output_path));
+        let link_support = params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text_document| text_document.definition.as_ref())
+            .and_then(|definition| definition.link_support)
+            .unwrap_or(false);
         let _ = self.0.config.set(Config {
             agda_path,
             extra_args,
             root,
+            link_support,
         });
 
         Ok(InitializeResult {
@@ -681,6 +708,10 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(input::trigger_characters()),
+                    ..CompletionOptions::default()
+                }),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
@@ -771,6 +802,60 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn completion(&self, params: CompletionParams) -> RpcResult<Option<CompletionResponse>> {
+        let request = params.text_document_position;
+        let Some(path) = path_of(&request.text_document.uri) else {
+            return Ok(None);
+        };
+        let position = request.position;
+        let found = {
+            let documents = self.0.documents.lock().unwrap();
+            let Some(document) = documents.get(&path) else {
+                return Ok(None);
+            };
+            let Some(line) = document.text.split('\n').nth(position.line as usize) else {
+                return Ok(None);
+            };
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            input::complete(line, position.character)
+        };
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        let range = Range::new(Position::new(position.line, found.start), position);
+        let items = found
+            .candidates
+            .into_iter()
+            .enumerate()
+            .map(|(rank, candidate)| {
+                let code_points: Vec<String> = candidate
+                    .symbol
+                    .chars()
+                    .map(|c| format!("U+{:04X}", c as u32))
+                    .collect();
+                CompletionItem {
+                    // Zed shows the label and then the detail: `→ \to`.
+                    label: candidate.symbol.to_string(),
+                    detail: Some(candidate.name.clone()),
+                    documentation: Some(Documentation::String(code_points.join(" "))),
+                    // Zed filters on the word before the cursor, which never
+                    // includes the leader.
+                    filter_text: Some(candidate.name[1..].to_string()),
+                    sort_text: Some(format!("{rank:04}")),
+                    text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(
+                        range,
+                        candidate.symbol.to_string(),
+                    ))),
+                    ..CompletionItem::default()
+                }
+            })
+            .collect();
+        Ok(Some(CompletionResponse::List(CompletionList {
+            is_incomplete: found.truncated,
+            items,
+        })))
+    }
+
     async fn hover(&self, params: HoverParams) -> RpcResult<Option<Hover>> {
         let position = params.text_document_position_params;
         let Some(path) = path_of(&position.text_document.uri) else {
@@ -809,7 +894,7 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&request.text_document.uri) else {
             return Ok(None);
         };
-        let (target_path, target_position) = {
+        let (origin, target_path, target_position) = {
             let documents = self.0.documents.lock().unwrap();
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
@@ -818,13 +903,19 @@ impl LanguageServer for Backend {
             let Some(link) = links::link_at(&document.links, offset) else {
                 return Ok(None);
             };
+            // The whole name as Agda sees it: `~>*step` is one name, though
+            // Zed's own word boundaries would split it in two.
+            let origin = range_of(&document.text, link.start, link.end);
             match &link.target {
                 Target::Here(target) => {
                     let at = text::position_of(&document.text, *target);
-                    let location = Location::new(request.text_document.uri, Range::new(at, at));
-                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                    return Ok(Some(self.0.definition(
+                        origin,
+                        request.text_document.uri,
+                        at,
+                    )));
                 }
-                Target::File { path, position } => (path.clone(), *position),
+                Target::File { path, position } => (origin, path.clone(), *position),
             }
         };
         // Agda's offsets refer to the file as it was on disk when it was
@@ -836,10 +927,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let at = text::position_of(&contents, target_position.saturating_sub(1));
-        Ok(Some(GotoDefinitionResponse::Scalar(Location::new(
-            uri,
-            Range::new(at, at),
-        ))))
+        Ok(Some(self.0.definition(origin, uri, at)))
     }
 
     async fn semantic_tokens_full(

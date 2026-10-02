@@ -28,6 +28,13 @@ Three details matter, all checked against Agda 2.8.0's real output:
    Targets in other files are read from disk, because Agda's offsets refer to
    the file as it was loaded.
 
+While `cmd` is held, Zed underlines the name under the mouse. Without help it
+uses its own word boundaries, which split an Agda name such as `~>*step` into
+`~>*` and `step`. The bridge therefore answers with a `LocationLink`, whose
+`originSelectionRange` is the name as Agda highlighted it, and Zed underlines
+exactly that range (`crates/editor/src/hover_links.rs`). Clients that do not
+announce `linkSupport` still get a plain location.
+
 ### Proven by the end-to-end test
 
 | Check | Result |
@@ -37,12 +44,15 @@ Three details matter, all checked against Agda 2.8.0's real output:
 | In `Uses.agda`, `suc` and `ℕ` lead into the imported `Nat.agda` | passes |
 | `two` in its definition leads to its type signature | passes |
 | A keyword has no definition | passes (null) |
+| In `Names.agda`, from `~>*step` and from its `s`, the link covers the whole name and leads to its type signature | passes; fails when the bridge sends a plain location |
 
 ### To check in Zed
 
 1. `cmd`-click a name defined in the same file, and one from an imported
    module or the standard library.
 2. Type a few lines above a name without saving, then `cmd`-click it again.
+3. Hold `cmd` over a name such as `~>*step` or the standard library's
+   `+-comm`: the whole name should be underlined.
 
 ### Limitations
 
@@ -110,14 +120,102 @@ README).
   `combined` mode) until the file is saved and loaded again.
 - The colours are the same in light and dark themes.
 
+## Done: Unicode input
+
+Type `\` and an abbreviation of Agda's Emacs mode, or `#` and the name of a
+Typst symbol, then pick the symbol from the completion menu with `tab` or
+`enter`:
+
+| You type | You get |
+| --- | --- |
+| `\to`, `\->` | → |
+| `\all`, `\forall` | ∀ |
+| `\bN` | ℕ |
+| `\Gl`, `\lambda` | λ |
+| `\==` | ≡ |
+| `\_1` | ₁ |
+| `#arrow.r` | → |
+| `#NN` | ℕ |
+| `#lt.eq` | ≤ |
+
+### How it works
+
+A Zed extension cannot add an input method or keybindings, so the bridge
+offers the symbols as completions (`bridge/src/input.rs`).
+
+1. **Two sources.** The abbreviations are agda2-vscode's dump of Agda's own
+   input method (`agda-input.el`, which includes the TeX input method of
+   Emacs), copied unchanged into `bridge/src/abbreviations.json`. The Typst
+   names come from the `codex` crate, the symbol table of Typst itself, in
+   which modifiers may come in any order (`#arrow.long.r` is `#arrow.r.long`).
+2. **The bridge finds the leader itself.** Looking back from the cursor, `\`
+   starts an abbreviation unless whitespace follows it, so a lambda such as
+   `\x → x` is left alone once the space is typed. `#` starts a Typst name
+   only at the start of a line or after whitespace, because Agda uses `#`
+   itself, in pragmas such as `{-# OPTIONS --safe #-}` and in names. The
+   completion replaces the leader and everything typed after it.
+3. **Zed must ask again after every character.** Zed only asks for
+   completions after a word character or a trigger character, and closes the
+   menu after any other character. Abbreviations contain punctuation (`\->`,
+   `\==`), so every ASCII punctuation character except `_` is a trigger
+   character; outside an abbreviation the bridge answers with nothing. Adding
+   those characters to `completion_query_characters` in `config.toml` would
+   also keep the menu open, but it would change Zed's own word completions
+   everywhere in Agda files, so the bridge uses trigger characters instead.
+4. **Order.** The abbreviation itself comes first, then shorter ones before
+   longer ones, and the symbols of one abbreviation keep the order of Agda's
+   Emacs mode, where the first one is the usual one. Zed filters on the word
+   before the cursor (`to` in `\to`), which never includes the leader, so the
+   filter text is the name without it. At most 200 candidates are sent at
+   once, and the list is then marked incomplete.
+5. **Left out:** abbreviations that contain `\` or a space (303 TeX
+   sequences, such as `\"\'I` for Ḯ, which the search for the leader would
+   cut at the second `\`), plain ASCII results (`#paren.l` is `(`), and
+   invisible characters, such as the narrow no-break space of `\,` or
+   Typst's `space.*`, which only confuse in source code. That leaves 2,321
+   abbreviations for 3,521 symbols, and 1,137 Typst symbols. The 200 symbols
+   that only those TeX sequences produce, letters with two accents such as Ǖ
+   and rare modifier letters such as ʱ, cannot be typed with `\`.
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| `\to`, `\->`, `\==`, `\bN`, `\Gl` and `\_1` offer `→`, `→`, `≡`, `ℕ`, `λ` and `₁` first; `\l` keeps the order of Agda's Emacs mode | passes |
+| `#arrow.r`, `#NN` and the partly typed `#alph` offer `→`, `ℕ` and `α` first; modifiers in any order (`#arrow.long.r` offers `⟶`), a partly typed modifier (`#arrow.r.doub` offers `⇒`) and a nested module (`#gender.fem`) work | passes |
+| Columns are UTF-16 units: after `𝔹` the leader is found at the right column, and a column inside `𝔹` or beyond the line gets no answer | passes; fails when columns count characters |
+| `#` in `{-#` and in `x#y` is left alone | passes; fails without the whitespace check |
+| Every character of every abbreviation is a word character or a trigger character | passes |
+| End to end, without Agda: the edit turns `\to` into `→`, `\bN` after `𝔹` starts at UTF-16 column 7, `#arrow.r` is completed, a pragma and ordinary text get nothing, and a lone `\` gets an incomplete list | passes |
+
+### To check in Zed
+
+1. Reinstall the bridge (`cargo install --path bridge`) and restart the
+   language server.
+2. Type `\to` and press `tab`. Type `\->`: the menu should stay open at `-`.
+   Type `#arrow.r.long`.
+3. Look at the order in the menu: Zed sorts by its own fuzzy score first and
+   uses the bridge's order only for ties, so it may differ from the order
+   above.
+4. Type a pragma such as `{-# OPTIONS --safe #-}`, to see whether the menu at
+   the closing `#` gets in the way.
+
+### Limitations
+
+- A symbol must be picked from the menu; Emacs replaces an abbreviation as
+  soon as it is unambiguous.
+- The menu also appears in comments and strings.
+- Literate Agda (`.lagda.md`) opens as Markdown in Zed, so it gets no
+  completions.
+
 ## Next steps
 
-1. **Unicode input** through completions: `\` with the abbreviations of
-   Agda's Emacs mode (which include the LaTeX names), and `#` with Typst's
-   symbol names from the `codex` crate, only after a space or at the start of
-   a line, because pragmas start with `{-#`.
-2. **Goal commands**: a lone `?` becomes `{!  !}` after loading, plus case
+1. **Goal commands**: a lone `?` becomes `{!  !}` after loading, plus case
    split, auto and solve.
-3. **A hover cache**, so hover stays fast during long loads.
+2. **A hover cache**, so hover stays fast during long loads.
+3. **How to type a symbol**: hover over `→` to see `\to`, `\->` and
+   `#arrow.r`, as agda2-vscode does; the tables are already in the bridge.
 4. Stretch goal: hover showing the type of any name in scope at the top
    level.
+5. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+   or asking to take over the `agda` id.
