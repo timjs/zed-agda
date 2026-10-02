@@ -20,7 +20,8 @@ use crate::highlight::{self, Span};
 use crate::links::{self, Link, Target};
 use crate::output::Output;
 use crate::protocol::{
-    DisplayInfo, GiveResult, GoalInfo, HighlightingEntry, InteractionPoint, Response, message_text,
+    DisplayInfo, GiveResult, GoalInfo, HighlightingEntry, InteractionPoint, MakeCaseVariant,
+    Response, Solution, message_text,
 };
 use crate::text::{self, Change};
 use crate::{input, iotcm, location, render};
@@ -28,6 +29,10 @@ use crate::{input, iotcm, location, render};
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
 pub const COMMAND_GOAL: &str = "agda.goal";
+pub const COMMAND_CASE_SPLIT: &str = "agda.caseSplit";
+pub const COMMAND_AUTO: &str = "agda.auto";
+pub const COMMAND_SOLVE: &str = "agda.solve";
+pub const COMMAND_SOLVE_ALL: &str = "agda.solveAll";
 pub const COMMAND_OPEN_OUTPUT: &str = "agda.openOutput";
 
 /// The extensions Agda accepts, as listed in its `InvalidExtensionError`.
@@ -82,16 +87,92 @@ struct Document {
     loaded_text: Option<String>,
 }
 
+impl Document {
+    /// Replace the chars `start..end` by `replacement` in this copy, moving
+    /// goals, links and highlighting along, and return the same edit for
+    /// Zed. Changing the copy first makes the `didChange` that Zed sends for
+    /// the edit a no-op, instead of racing with this update. With `stretch`,
+    /// highlighting of exactly the replaced text covers the replacement.
+    fn replace(&mut self, start: usize, end: usize, replacement: &str, stretch: bool) -> TextEdit {
+        let edit = TextEdit::new(range_of(&self.text, start, end), replacement.to_string());
+        let chars: Vec<char> = self.text.chars().collect();
+        let new_text: String = chars[..start]
+            .iter()
+            .copied()
+            .chain(replacement.chars())
+            .chain(chars[end..].iter().copied())
+            .collect();
+        let change = Change {
+            start,
+            old_end: end,
+            new_len: replacement.chars().count(),
+        };
+        let old_text = std::mem::replace(&mut self.text, new_text);
+        goals::adjust(&mut self.goals, &old_text, &change);
+        links::adjust(&mut self.links, &change);
+        if stretch {
+            highlight::adjust_stretching(&mut self.spans, &change);
+        } else {
+            highlight::adjust(&mut self.spans, &change);
+        }
+        edit
+    }
+
+    /// Replace every goal that is a lone `?` by `{!  !}`, as Agda's Emacs
+    /// mode does after loading. The goals keep their numbers, because Agda
+    /// knows them by number only.
+    fn expand_question_marks(&mut self) -> Vec<TextEdit> {
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut lone: Vec<Goal> = self
+            .goals
+            .iter()
+            .filter(|goal| goal.end == goal.start + 1 && chars.get(goal.start) == Some(&'?'))
+            .cloned()
+            .collect();
+        // From last to first: each edit then leaves the positions of the
+        // ones before it alone, so all edits refer to the text Zed has.
+        lone.sort_by_key(|goal| std::cmp::Reverse(goal.start));
+        let width = GOAL_MARKER.chars().count();
+        let edits = lone
+            .into_iter()
+            .map(|goal| {
+                // An edit that replaces a goal removes it; put it back.
+                let edit = self.replace(goal.start, goal.end, GOAL_MARKER, true);
+                self.goals.push(Goal {
+                    end: goal.start + width,
+                    ..goal
+                });
+                edit
+            })
+            .collect();
+        self.goals.sort_by_key(|goal| goal.start);
+        edits
+    }
+}
+
 struct Session {
     agda: Agda,
     /// Agda keeps one "current file"; goal commands only work on that file.
     current_file: Option<PathBuf>,
 }
 
+/// The goal commands that end in Agda's `GiveAction`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GoalCommand {
     Give,
     Refine,
+    /// Proof search, with the goal's text as hints.
+    Auto,
+}
+
+impl GoalCommand {
+    fn title(self) -> &'static str {
+        match self {
+            GoalCommand::Give => "Give",
+            GoalCommand::Refine => "Refine",
+            GoalCommand::Auto => "Auto",
+        }
+    }
 }
 
 pub struct Bridge {
@@ -107,9 +188,16 @@ pub struct Bridge {
 struct Outcome {
     interaction_points: Option<Vec<InteractionPoint>>,
     goal_types: HashMap<u32, String>,
+    /// Whether Agda listed all goals, and so their types; give does, auto
+    /// does not.
+    goals_listed: bool,
     errors: Vec<String>,
     warnings: Vec<String>,
     give: Option<(u32, GiveResult)>,
+    make_case: Option<(u32, MakeCaseVariant, Vec<String>)>,
+    solutions: Option<Vec<Solution>>,
+    /// What auto said when it found nothing.
+    auto: Option<String>,
     goal_info: Option<(u32, GoalInfo)>,
     displays: Vec<Value>,
     highlighting: Vec<HighlightingEntry>,
@@ -127,6 +215,12 @@ impl Outcome {
                     interaction_point,
                     give_result,
                 } => outcome.give = Some((interaction_point.id, give_result)),
+                Response::MakeCase {
+                    interaction_point,
+                    variant,
+                    clauses,
+                } => outcome.make_case = Some((interaction_point.id, variant, clauses)),
+                Response::SolveAll { solutions } => outcome.solutions = Some(solutions),
                 Response::DisplayInfo { info } => {
                     match DisplayInfo::parse(&info) {
                         DisplayInfo::AllGoalsWarnings {
@@ -135,6 +229,7 @@ impl Outcome {
                             errors,
                             ..
                         } => {
+                            outcome.goals_listed = true;
                             for goal in &visible_goals {
                                 if let (Some(id), Some(ty)) = (goal.goal_id(), &goal.ty) {
                                     outcome.goal_types.insert(id, ty.clone());
@@ -158,6 +253,7 @@ impl Outcome {
                             interaction_point,
                             goal_info,
                         } => outcome.goal_info = Some((interaction_point.id, goal_info)),
+                        DisplayInfo::Auto { info } => outcome.auto = Some(info),
                         DisplayInfo::Other => {}
                     }
                     outcome.displays.push(info);
@@ -276,10 +372,14 @@ impl Bridge {
         if !is_agda_source(path) {
             return Err(format!("{} is not an Agda file.", path.display()));
         }
-        let snapshot = match self.documents.lock().unwrap().get(path) {
-            Some(document) => document.text.clone(),
-            None => std::fs::read_to_string(path)
-                .map_err(|err| format!("Cannot read {}: {err}", path.display()))?,
+        // Whether Zed has the file open; only then can goals be expanded.
+        let (snapshot, opened) = match self.documents.lock().unwrap().get(path) {
+            Some(document) => (document.text.clone(), true),
+            None => (
+                std::fs::read_to_string(path)
+                    .map_err(|err| format!("Cannot read {}: {err}", path.display()))?,
+                false,
+            ),
         };
 
         let mut guard = self.lock_session().await?;
@@ -341,7 +441,7 @@ impl Bridge {
                 .iter()
                 .map(|message| problem(&snapshot, &file, message, DiagnosticSeverity::WARNING)),
         );
-        {
+        let expansions = {
             let mut documents = self.documents.lock().unwrap();
             let document = documents
                 .entry(path.to_path_buf())
@@ -360,6 +460,16 @@ impl Bridge {
             document.goal_types = outcome.goal_types.clone();
             document.problems = problems;
             document.loaded_text = Some(snapshot);
+            if opened {
+                document.expand_question_marks()
+            } else {
+                Vec::new()
+            }
+        };
+        if !expansions.is_empty()
+            && let Err(message) = self.apply_edits(path, expansions).await
+        {
+            self.report(Err(message)).await;
         }
 
         self.publish(path).await;
@@ -395,21 +505,25 @@ impl Bridge {
         }
     }
 
-    /// Give or refine a goal with the expression typed in it, and apply
-    /// Agda's result to the buffer with `workspace/applyEdit`.
+    /// The text typed in a goal, trimmed.
+    fn goal_content(&self, path: &Path, id: u32) -> Result<String, String> {
+        let documents = self.documents.lock().unwrap();
+        let document = documents.get(path).ok_or("This file is not open.")?;
+        let goal = document
+            .goals
+            .iter()
+            .find(|goal| goal.id == id)
+            .ok_or(format!(
+                "Goal ?{id} no longer exists. Save the file to reload it."
+            ))?;
+        Ok(goal.content(&document.text))
+    }
+
+    /// Give, refine or auto a goal, with the expression typed in it (for
+    /// auto, hints), and apply Agda's result to the buffer with
+    /// `workspace/applyEdit`.
     pub async fn give(&self, path: &Path, id: u32, command: GoalCommand) -> Result<String, String> {
-        let expression = {
-            let documents = self.documents.lock().unwrap();
-            let document = documents.get(path).ok_or("This file is not open.")?;
-            let goal = document
-                .goals
-                .iter()
-                .find(|goal| goal.id == id)
-                .ok_or(format!(
-                    "Goal ?{id} no longer exists. Save the file to reload it."
-                ))?;
-            goal.content(&document.text)
-        };
+        let expression = self.goal_content(path, id)?;
         if command == GoalCommand::Give && expression.is_empty() {
             return Err(format!(
                 "Type an expression in goal ?{id} first, then give it."
@@ -421,24 +535,34 @@ impl Bridge {
         let request = match command {
             GoalCommand::Give => iotcm::give(path, id, &expression),
             GoalCommand::Refine => iotcm::refine(path, id, &expression),
+            GoalCommand::Auto => iotcm::auto_one(path, id, &expression),
         };
         let outcome = Outcome::collect(self.run(&mut guard, &request).await?);
         drop(guard);
 
-        let Some((given, result)) = outcome.give.clone() else {
-            self.show_output(&format!("Give ?{id}"), path, &outcome.markdown())
+        let title = command.title();
+        if outcome.give.is_none() {
+            self.show_output(&format!("{title} ?{id}"), path, &outcome.markdown())
                 .await;
             return Err(outcome
-                .errors
-                .first()
-                .cloned()
+                .auto
+                .clone()
+                .or_else(|| outcome.errors.first().cloned())
                 .unwrap_or_else(|| "Agda did not fill the goal.".into()));
-        };
+        }
+        let given = self.apply_give(path, &outcome).await?;
+        self.publish(path).await;
+        self.show_output(&format!("{title} ?{given}"), path, &outcome.markdown())
+            .await;
+        Ok(format!("Filled goal ?{given}."))
+    }
 
-        // Compute the edit against the current text, and apply it to the
-        // bridge's copy right away, so the `didChange` that Zed sends for it
-        // turns out to be a no-op instead of racing with this update.
-        let (uri, edit) = {
+    /// Apply the `GiveAction` of `outcome` to the buffer: the goal becomes
+    /// Agda's text, and goals in that text get the numbers Agda gave them.
+    /// Returns the number of the filled goal.
+    async fn apply_give(&self, path: &Path, outcome: &Outcome) -> Result<u32, String> {
+        let (given, result) = outcome.give.clone().ok_or("Agda did not fill the goal.")?;
+        let edit = {
             let mut documents = self.documents.lock().unwrap();
             let document = documents.get_mut(path).ok_or("This file was closed.")?;
             let goal = document
@@ -452,23 +576,7 @@ impl Bridge {
                 GiveResult::Paren { paren: true } => format!("({})", goal.content(&document.text)),
                 GiveResult::Paren { paren: false } => goal.content(&document.text),
             });
-            let range = range_of(&document.text, goal.start, goal.end);
-            let chars: Vec<char> = document.text.chars().collect();
-            let new_text: String = chars[..goal.start]
-                .iter()
-                .copied()
-                .chain(replacement.chars())
-                .chain(chars[goal.end..].iter().copied())
-                .collect();
-            let change = Change {
-                start: goal.start,
-                old_end: goal.end,
-                new_len: replacement.chars().count(),
-            };
-            let old_text = std::mem::replace(&mut document.text, new_text);
-            goals::adjust(&mut document.goals, &old_text, &change);
-            links::adjust(&mut document.links, &change);
-            highlight::adjust(&mut document.spans, &change);
+            let edit = document.replace(goal.start, goal.end, &replacement, false);
 
             // Goals created by the result (`suc ?`) get the ids Agda did not know before.
             if let Some(points) = &outcome.interaction_points {
@@ -490,29 +598,134 @@ impl Bridge {
                 }
                 document.goals.sort_by_key(|goal| goal.start);
             }
-            document.goal_types = outcome.goal_types.clone();
-            let uri = uri_of(path).ok_or("Invalid file path.")?;
-            (uri, TextEdit::new(range, replacement))
+            if outcome.goals_listed {
+                document.goal_types = outcome.goal_types.clone();
+            } else {
+                document.goal_types.remove(&given);
+            }
+            edit
         };
+        self.apply_edits(path, vec![edit]).await?;
+        Ok(given)
+    }
 
+    /// Ask Zed to apply `edits` to the file, all against the same text.
+    async fn apply_edits(&self, path: &Path, edits: Vec<TextEdit>) -> Result<(), String> {
+        let uri = uri_of(path).ok_or("Invalid file path.")?;
         let edit = WorkspaceEdit {
-            changes: Some(HashMap::from([(uri, vec![edit])])),
+            changes: Some(HashMap::from([(uri, edits)])),
             ..WorkspaceEdit::default()
         };
         match self.client.apply_edit(edit).await {
-            Ok(response) if response.applied => {}
-            Ok(response) => {
-                return Err(format!(
-                    "Zed did not apply the edit: {}",
-                    response.failure_reason.unwrap_or_default()
-                ));
-            }
-            Err(err) => return Err(format!("Zed did not apply the edit: {err}")),
+            Ok(response) if response.applied => Ok(()),
+            Ok(response) => Err(format!(
+                "Zed did not apply the edit: {}",
+                response.failure_reason.unwrap_or_default()
+            )),
+            Err(err) => Err(format!("Zed did not apply the edit: {err}")),
         }
+    }
+
+    /// Case split on the variables typed in a goal, or, with none, introduce
+    /// the missing patterns or split on the result. Agda's new clauses
+    /// replace the goal's clause; their goals get numbers when the file is
+    /// saved and loaded again (Emacs saves and reloads by itself).
+    pub async fn case_split(&self, path: &Path, id: u32) -> Result<String, String> {
+        let variables = self.goal_content(path, id)?;
+        let mut guard = self.lock_session().await?;
+        Self::check_current(&guard, path)?;
+        let outcome = Outcome::collect(
+            self.run(&mut guard, &iotcm::make_case(path, id, &variables))
+                .await?,
+        );
+        drop(guard);
+
+        let Some((split, variant, clauses)) = outcome.make_case.clone() else {
+            self.show_output(&format!("Case split ?{id}"), path, &outcome.markdown())
+                .await;
+            return Err(outcome
+                .errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Agda did not split the goal.".into()));
+        };
+        let edit = {
+            let mut documents = self.documents.lock().unwrap();
+            let document = documents.get_mut(path).ok_or("This file was closed.")?;
+            let goal = document
+                .goals
+                .iter()
+                .find(|goal| goal.id == split)
+                .cloned()
+                .ok_or(format!("Goal ?{split} disappeared while Agda was working."))?;
+            let (start, end, replacement) =
+                goals::case_split(&document.text, &goal, variant, &clauses);
+            document.replace(start, end, &replacement, false)
+        };
+        self.apply_edits(path, vec![edit]).await?;
         self.publish(path).await;
-        self.show_output(&format!("Give ?{given}"), path, &outcome.markdown())
+        let markdown = format!(
+            "Split goal ?{split} into {} clauses. Save the file to load them, so \
+             that their goals get numbers.\n",
+            clauses.len()
+        );
+        self.show_output(&format!("Case split ?{split}"), path, &markdown)
             .await;
-        Ok(format!("Filled goal ?{given}."))
+        Ok(format!(
+            "Split goal ?{split}. Save the file to load the new clauses."
+        ))
+    }
+
+    /// Fill the goals that unification already solved, as Emacs does: Agda
+    /// names a solution for each, which is then given. Only goal `id`, or
+    /// all goals.
+    pub async fn solve(&self, path: &Path, id: Option<u32>) -> Result<String, String> {
+        let title = match id {
+            Some(id) => format!("Solve ?{id}"),
+            None => "Solve all goals".to_string(),
+        };
+        let mut guard = self.lock_session().await?;
+        Self::check_current(&guard, path)?;
+        let request = match id {
+            Some(id) => iotcm::solve_one(path, id),
+            None => iotcm::solve_all(path),
+        };
+        let outcome = Outcome::collect(self.run(&mut guard, &request).await?);
+        let solutions = outcome.solutions.clone().unwrap_or_default();
+        if solutions.is_empty() {
+            drop(guard);
+            if let Some(error) = outcome.errors.first() {
+                self.show_output(&title, path, &outcome.markdown()).await;
+                return Err(error.clone());
+            }
+            return Err(match id {
+                Some(id) => format!("Agda has no solution for goal ?{id} yet."),
+                None => "Agda has no solution for any goal yet.".into(),
+            });
+        }
+
+        // Keep Agda to this file until every solution is in the buffer, so a
+        // load in between cannot renumber the goals.
+        let mut filled = Vec::new();
+        let mut markdown = String::new();
+        for solution in solutions {
+            let given = Outcome::collect(
+                self.run(
+                    &mut guard,
+                    &iotcm::give(path, solution.interaction_point, &solution.expression),
+                )
+                .await?,
+            );
+            markdown = given.markdown();
+            if given.give.is_some() {
+                filled.push(self.apply_give(path, &given).await?);
+            }
+        }
+        drop(guard);
+        self.publish(path).await;
+        self.show_output(&title, path, &markdown).await;
+        let filled: Vec<String> = filled.iter().map(|id| format!("?{id}")).collect();
+        Ok(format!("Solved {}.", filled.join(", ")))
     }
 
     /// The goal at a 1-based row and UTF-8 byte column, as Zed's task
@@ -718,6 +931,10 @@ impl LanguageServer for Backend {
                         COMMAND_GIVE.into(),
                         COMMAND_REFINE.into(),
                         COMMAND_GOAL.into(),
+                        COMMAND_CASE_SPLIT.into(),
+                        COMMAND_AUTO.into(),
+                        COMMAND_SOLVE.into(),
+                        COMMAND_SOLVE_ALL.into(),
                         COMMAND_OPEN_OUTPUT.into(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -960,7 +1177,7 @@ impl LanguageServer for Backend {
             };
             let offset = text::offset_of(&document.text, params.range.start);
             let goal = goals::goal_at(&document.goals, offset)
-                .map(|goal| (goal.id, !goal.content(&document.text).is_empty()));
+                .map(|goal| (goal.id, goal.content(&document.text)));
             let line = params.range.start.line;
             let on_problem = document
                 .problems
@@ -981,7 +1198,8 @@ impl LanguageServer for Backend {
             })
         };
         let mut actions = Vec::new();
-        if let Some((id, has_content)) = goal {
+        if let Some((id, content)) = &goal {
+            let id = *id;
             let goal_action = |title: String, command: &str| {
                 let arguments = vec![json!(uri.as_str()), json!(id)];
                 action(
@@ -991,10 +1209,23 @@ impl LanguageServer for Backend {
                     Some(CodeActionKind::REFACTOR_REWRITE),
                 )
             };
-            if has_content {
+            if !content.is_empty() {
                 actions.push(goal_action(format!("Agda: give ?{id}"), COMMAND_GIVE));
             }
             actions.push(goal_action(format!("Agda: refine ?{id}"), COMMAND_REFINE));
+            let split = match content.is_empty() {
+                true => format!("Agda: case split ?{id}"),
+                false => format!("Agda: case split ?{id} on {content}"),
+            };
+            actions.push(goal_action(split, COMMAND_CASE_SPLIT));
+            actions.push(goal_action(format!("Agda: auto ?{id}"), COMMAND_AUTO));
+            actions.push(goal_action(format!("Agda: solve ?{id}"), COMMAND_SOLVE));
+            actions.push(action(
+                "Agda: solve all goals".into(),
+                COMMAND_SOLVE_ALL,
+                vec![json!(uri.as_str())],
+                Some(CodeActionKind::REFACTOR_REWRITE),
+            ));
             actions.push(goal_action(
                 format!("Agda: show goal ?{id} in output"),
                 COMMAND_GOAL,
@@ -1029,17 +1260,25 @@ impl LanguageServer for Backend {
             .get(1)
             .and_then(Value::as_u64)
             .map(|id| id as u32);
-        let (Some(path), Some(id)) = (uri.as_ref().and_then(path_of), id) else {
+        let Some(path) = uri.as_ref().and_then(path_of) else {
             return Ok(None);
         };
+        // Every command but solve all is about one goal.
+        if id.is_none() && params.command != COMMAND_SOLVE_ALL {
+            return Ok(None);
+        }
         // Run in the background, so a long Agda command does not occupy one of
         // the server's request slots while it waits.
         let bridge = self.0.clone();
         tokio::spawn(async move {
-            let result = match params.command.as_str() {
-                COMMAND_GIVE => bridge.give(&path, id, GoalCommand::Give).await,
-                COMMAND_REFINE => bridge.give(&path, id, GoalCommand::Refine).await,
-                COMMAND_GOAL => match bridge.goal_info(&path, id, true).await {
+            let result = match (params.command.as_str(), id) {
+                (COMMAND_SOLVE_ALL, _) => bridge.solve(&path, None).await,
+                (COMMAND_GIVE, Some(id)) => bridge.give(&path, id, GoalCommand::Give).await,
+                (COMMAND_REFINE, Some(id)) => bridge.give(&path, id, GoalCommand::Refine).await,
+                (COMMAND_AUTO, Some(id)) => bridge.give(&path, id, GoalCommand::Auto).await,
+                (COMMAND_CASE_SPLIT, Some(id)) => bridge.case_split(&path, id).await,
+                (COMMAND_SOLVE, Some(id)) => bridge.solve(&path, Some(id)).await,
+                (COMMAND_GOAL, Some(id)) => match bridge.goal_info(&path, id, true).await {
                     Ok(markdown) => {
                         bridge
                             .show_output(&format!("Goal ?{id}"), &path, &markdown)
@@ -1048,7 +1287,7 @@ impl LanguageServer for Backend {
                     }
                     Err(message) => Err(message),
                 },
-                other => Err(format!("Unknown command {other}")),
+                (other, _) => Err(format!("Unknown command {other}")),
             };
             bridge.report(result).await;
         });

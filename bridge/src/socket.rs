@@ -108,8 +108,10 @@ async fn handle(bridge: Arc<Bridge>, stream: tokio::net::UnixStream) -> io::Resu
 }
 
 async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
-    if request.command == "load" {
-        return bridge.load(&request.file).await;
+    match request.command.as_str() {
+        "load" => return bridge.load(&request.file).await,
+        "solve-all" => return bridge.solve(&request.file, None).await,
+        _ => {}
     }
     let (Some(row), Some(column)) = (request.row, request.column) else {
         return Err(format!("`{}` needs --row and --column.", request.command));
@@ -120,6 +122,9 @@ async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
     match request.command.as_str() {
         "give" => bridge.give(&request.file, id, GoalCommand::Give).await,
         "refine" => bridge.give(&request.file, id, GoalCommand::Refine).await,
+        "auto" => bridge.give(&request.file, id, GoalCommand::Auto).await,
+        "case-split" => bridge.case_split(&request.file, id).await,
+        "solve" => bridge.solve(&request.file, Some(id)).await,
         "goal" => {
             let markdown = bridge.goal_info(&request.file, id, true).await?;
             bridge
@@ -131,7 +136,8 @@ async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
     }
 }
 
-const USAGE: &str = "usage: agda-bridge client <load|goal|give|refine> --file FILE \
+const USAGE: &str = "usage: agda-bridge client \
+                     <load|goal|give|refine|case-split|auto|solve|solve-all> --file FILE \
                      [--root DIR] [--row N --column N]";
 
 /// The `agda-bridge client` subcommand. Returns the process exit code.

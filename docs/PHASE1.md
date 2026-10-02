@@ -208,13 +208,96 @@ offers the symbols as completions (`bridge/src/input.rs`).
 - Literate Agda (`.lagda.md`) opens as Markdown in Zed, so it gets no
   completions.
 
+## Done: goal commands
+
+After loading, every goal written as a lone `?` becomes `{!  !}`, as in
+Emacs. On a goal, the code actions (`cmd-.` on macOS, `ctrl-.` on Linux) now
+offer, besides give and refine:
+
+| Code action | Agda command | Result |
+| --- | --- | --- |
+| case split ?n (on `x`) | `Cmd_make_case` | Agda's new clauses replace the clause of the goal |
+| auto ?n | `Cmd_autoOne AsIs` | proof search fills the goal, with the goal's text as hints |
+| solve ?n, solve all goals | `Cmd_solveOne Simplified`, `Cmd_solveAll AsIs` | goals that unification already solved are filled, such as `{?}` in `id {?} (suc zero)` |
+
+The rewrite modes are the defaults of Agda's Emacs mode (`agda2-mode.el`).
+
+### What was learned
+
+All of it was checked against Agda 2.8.0's real answers.
+
+1. **Auto answers like give**, with a `GiveAction`, but without the list of
+   all goals that give sends. The first version of the bridge therefore lost
+   the types of the other goals after auto (the end-to-end test caught it);
+   now they are kept, and only the filled goal's type goes. When auto finds
+   nothing, Agda says "No solution found".
+2. **Solve fills nothing itself.** Agda answers with a solution for each goal
+   (`{"interactionPoint": 5, "expression": "ℕ"}`, with the goal as a bare
+   number, unlike elsewhere), and Emacs then gives each one. The bridge does
+   the same, and keeps Agda to itself until all of them are in the buffer, so
+   that a load in between cannot renumber the goals.
+3. **Case split replaces text the way Emacs does**, ported from
+   `agda2-make-case-action` and `agda2-make-case-action-extendlam`: in a
+   function clause, the line of the goal from its indentation on (with the
+   rest of that line); in `λ { … }`, only the clause, which starts after the
+   `{` or `;` before the goal (skipping the braces of implicit arguments),
+   with the new clauses separated by `;`; in `λ where`, the line, with one
+   line per clause.
+4. **After a case split, Emacs saves and loads again.** A language server
+   cannot save a file in Zed, and Agda reads the file from disk, so the new
+   goals get their numbers when you save. Until then they are plain text,
+   without code actions or hover; the output file says so.
+5. **Expanding `?` needs no reload.** Agda knows goals only by number, so the
+   bridge replaces the text, keeps the numbers, and lets the hole's
+   highlighting grow along (an ordinary edit over highlighted text removes
+   it). The file is then modified, as in Emacs. `{?}` becomes `{{!  !}}`,
+   which Agda accepts although `{{` also opens an instance argument (checked
+   with Agda 2.8.0). Only files open in Zed are expanded, all `?`s in one
+   edit.
+6. **The edits stay unversioned.** Zed can move a versioned edit along with
+   typing that happened in between, but solving several goals sends several
+   edits, and the version after each one only arrives later, with Zed's
+   `didChange`. The bridge computes each edit from its own copy, which is up
+   to date, so only typing during the few milliseconds the edit travels could
+   get in the way.
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| Agda 2.8.0's answers to case split (both variants), solve and a failed auto are read | passes |
+| Case split of a function clause: Agda's two clauses replace the line, keep the indentation in a `where` block, drop a comment after the goal (as Emacs does) and keep a Windows line end | passes |
+| Case split in an extended lambda: only the clause after the last `;`, with the braces of `{y}` skipped; in `λ where` one clause per line | passes; fails without counting braces |
+| The hole of a `?` stretches with its expansion; an ordinary edit removes it | passes |
+| End to end with `Goals.agda`: after loading both `?`s become `{!  !}` in one edit and keep their numbers ?1 and ?2, with the hole highlighting over all six characters; the code actions; auto fills `p` with `refl` and the other goals keep their types; solve on ?0 says there is no solution; solve all fills `{ℕ}`; case split replaces line 11 by two clauses, and in the lambda only the clause; after saving, Agda accepts the result, numbers the four new goals and nothing needs expanding | passes; fails without stretching the highlighting |
+
+### To check in Zed
+
+1. Reinstall the bridge (`cargo install --path bridge`) and restart the
+   language server.
+2. Open a file with `?` goals: after loading they should read `{!  !}`, and
+   the file should be modified.
+3. Type a variable in a goal, press `cmd-.` and choose case split; save, and
+   the new goals should get numbers.
+4. Try auto on a simple goal, and solve all goals on `id {?} (suc zero)`.
+
+### Limitations
+
+- The goals of a case split get numbers only when the file is saved.
+- After a load that expanded `?`s, the file is modified until it is saved.
+- Auto uses the syntax of Agda 2.7 and later; Agda 2.6 needs the version
+  gates planned for phase 4.
+- Case split assumes the goal is on one line, as Emacs does.
+
 ## Next steps
 
-1. **Goal commands**: a lone `?` becomes `{!  !}` after loading, plus case
-   split, auto and solve.
-2. **A hover cache**, so hover stays fast during long loads.
-3. **How to type a symbol**: hover over `→` to see `\to`, `\->` and
+1. **A hover cache**, so hover stays fast during long loads.
+2. **How to type a symbol**: hover over `→` to see `\to`, `\->` and
    `#arrow.r`, as agda2-vscode does; the tables are already in the bridge.
+3. **Goal commands that only show information**: the goal's type together
+   with the type of the expression in it (`Cmd_goal_type_context_infer`), the
+   normal form of an expression (`Cmd_compute`), why a name is in scope, and
+   the type of a helper function.
 4. Stretch goal: hover showing the type of any name in scope at the top
    level.
 5. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge

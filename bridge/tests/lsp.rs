@@ -356,14 +356,19 @@ fn drives_agda_through_lsp_and_debug_client() {
         location(&spike_uri, 2, 5)
     );
 
-    // Code actions on a filled hole offer give, refine, showing the goal and
-    // the output file; a line without goals or problems offers nothing.
+    // Code actions on a filled hole offer the goal commands, showing the
+    // goal and the output file; a line without goals or problems offers
+    // nothing.
     let titles = client.code_actions(&spike_uri, position_of(&text, "suc (n", 0));
     assert_eq!(
         titles,
         [
             "Agda: give ?0",
             "Agda: refine ?0",
+            "Agda: case split ?0 on suc (n + m)",
+            "Agda: auto ?0",
+            "Agda: solve ?0",
+            "Agda: solve all goals",
             "Agda: show goal ?0 in output",
             "Agda: open output file"
         ]
@@ -821,6 +826,217 @@ fn completes_unicode_input() {
     let result = complete(&mut client, 4, 5);
     assert_eq!(result["isIncomplete"], true);
     assert!(result["items"].as_array().unwrap().len() <= 200);
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Wait until the output file contains `needle`: the bridge writes it after
+/// publishing diagnostics, so it may lag behind them.
+fn wait_for_output(path: &Path, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        let output = std::fs::read_to_string(path).unwrap_or_default();
+        if output.contains(needle) || std::time::Instant::now() > deadline {
+            return output;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Apply all edits of one `workspace/applyEdit`, which refer to the same
+/// text, from the last to the first.
+fn apply_all(text: &str, edits: &[Value]) -> String {
+    let mut edits = edits.to_vec();
+    let key = |edit: &Value| {
+        let start = &edit["range"]["start"];
+        (start["line"].as_u64(), start["character"].as_u64())
+    };
+    edits.sort_by_key(|edit| std::cmp::Reverse(key(edit)));
+    edits
+        .iter()
+        .fold(text.to_string(), |text, edit| apply(&text, edit))
+}
+
+#[test]
+fn goal_commands() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("goal-commands", &["Goals.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    let init = client.initialize(&root, &agda);
+    let legend = init["capabilities"]["semanticTokensProvider"]["legend"].clone();
+    let commands = init["capabilities"]["executeCommandProvider"]["commands"].clone();
+    for command in ["agda.caseSplit", "agda.auto", "agda.solve", "agda.solveAll"] {
+        assert!(
+            commands.as_array().unwrap().contains(&json!(command)),
+            "{command}"
+        );
+    }
+
+    let goals = root.join("Goals.agda");
+    let goals_uri = uri(&goals);
+    let mut text = std::fs::read_to_string(&goals).unwrap();
+    let mut version = 1;
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": goals_uri, "languageId": "agda", "version": version, "text": text } }),
+    );
+
+    // After loading, both lone `?`s become `{!  !}` in one edit, and keep
+    // their goal numbers.
+    let edit = client.wait_for("applyEdit", |m| m["method"] == "workspace/applyEdit");
+    let edits = edit["params"]["edit"]["changes"][&goals_uri]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(edits.len(), 2);
+    assert!(edits.iter().all(|edit| edit["newText"] == "{!  !}"));
+    text = apply_all(&text, &edits);
+    assert!(
+        text.contains("p = {!  !}\n") && text.contains("id {{!  !}} (suc"),
+        "{text}"
+    );
+    let change = |client: &mut Client, text: &str, version: i32| {
+        client.notify(
+            "textDocument/didChange",
+            json!({ "textDocument": { "uri": goals_uri, "version": version },
+                    "contentChanges": [{ "text": text }] }),
+        );
+    };
+    version += 1;
+    change(&mut client, &text, version);
+    let diagnostics = client.diagnostics(&goals_uri, |d| d.len() == 4);
+    assert_eq!(
+        messages(&diagnostics, 3),
+        ["?0 : ℕ", "?1 : zero ≡ zero", "?2 : Set", "?3 : ℕ"]
+    );
+    let p = position_of(&text, "{!  !}", 0);
+    let goal_1 = diagnostics
+        .iter()
+        .find(|d| d["message"] == "?1 : zero ≡ zero")
+        .unwrap();
+    assert_eq!(goal_1["range"]["start"], p);
+    assert_eq!(goal_1["range"]["end"]["character"], 10);
+    // The hole's highlighting grew with it.
+    let tokens = semantic_tokens(&mut client, &goals_uri, &legend);
+    assert!(
+        tokens.contains(&token(13, 4, 6, "region", &["hole"])),
+        "{tokens:#?}"
+    );
+
+    // Code actions on a goal offer every goal command.
+    let titles = client.code_actions(&goals_uri, position_of(&text, "{! n !}", 0));
+    assert_eq!(
+        titles,
+        [
+            "Agda: give ?0",
+            "Agda: refine ?0",
+            "Agda: case split ?0 on n",
+            "Agda: auto ?0",
+            "Agda: solve ?0",
+            "Agda: solve all goals",
+            "Agda: show goal ?0 in output",
+            "Agda: open output file"
+        ]
+    );
+
+    // Run a goal command and return the edits Zed is asked to apply.
+    let run = |client: &mut Client, command: &str, arguments: Value| -> Vec<Value> {
+        client.received.clear();
+        client.request(
+            "workspace/executeCommand",
+            json!({ "command": command, "arguments": arguments }),
+        );
+        let edit = client.wait_for(command, |m| m["method"] == "workspace/applyEdit");
+        edit["params"]["edit"]["changes"][&goals_uri]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+
+    // Auto finds `refl` for `p`.
+    let edits = run(&mut client, "agda.auto", json!([goals_uri, 1]));
+    assert_eq!(edits[0]["newText"], "refl");
+    text = apply_all(&text, &edits);
+    version += 1;
+    change(&mut client, &text, version);
+    let diagnostics = client.diagnostics(&goals_uri, |d| d.len() == 3);
+    assert_eq!(messages(&diagnostics, 3), ["?0 : ℕ", "?2 : Set", "?3 : ℕ"]);
+
+    // Solve: Agda has nothing for ?0, but unification solved ?2.
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": "agda.solve", "arguments": [goals_uri, 0] }),
+    );
+    let message = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
+    assert_eq!(
+        message["params"]["message"],
+        "Agda has no solution for goal ?0 yet."
+    );
+    let edits = run(&mut client, "agda.solveAll", json!([goals_uri]));
+    assert_eq!(edits[0]["newText"], "ℕ");
+    text = apply_all(&text, &edits);
+    assert!(text.contains("two = id {ℕ} (suc (suc zero))"), "{text}");
+    version += 1;
+    change(&mut client, &text, version);
+    let diagnostics = client.diagnostics(&goals_uri, |d| d.len() == 2);
+    assert_eq!(messages(&diagnostics, 3), ["?0 : ℕ", "?3 : ℕ"]);
+
+    // Case split in a function clause replaces its line; the new goals have
+    // no numbers until the file is loaded again.
+    let edits = run(&mut client, "agda.caseSplit", json!([goals_uri, 0]));
+    assert_eq!(edits[0]["newText"], "zero + m = {!  !}\nsuc n + m = {!  !}");
+    assert_eq!(
+        edits[0]["range"]["start"],
+        json!({ "line": 10, "character": 0 })
+    );
+    assert_eq!(
+        edits[0]["range"]["end"],
+        json!({ "line": 10, "character": 15 })
+    );
+    text = apply_all(&text, &edits);
+    version += 1;
+    change(&mut client, &text, version);
+    let diagnostics = client.diagnostics(&goals_uri, |d| d.len() == 1);
+    assert_eq!(messages(&diagnostics, 3), ["?3 : ℕ"]);
+    let output = wait_for_output(&root.join(".zed/agda-output.md"), "Save the file");
+    assert!(output.contains("Save the file to load them"), "{output}");
+
+    // In an extended lambda only the clause is replaced.
+    let edits = run(&mut client, "agda.caseSplit", json!([goals_uri, 3]));
+    text = apply_all(&text, &edits);
+    assert!(
+        text.contains("f = λ { zero → {!  !} ; (suc x) → {!  !} }\n"),
+        "{text}"
+    );
+    version += 1;
+    change(&mut client, &text, version);
+
+    // Saving loads the new clauses: Agda accepts them and numbers their four
+    // goals, and nothing needs expanding.
+    std::fs::write(&goals, &text).unwrap();
+    client.received.clear();
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": goals_uri } }),
+    );
+    let diagnostics = client.diagnostics(&goals_uri, |d| d.len() == 4);
+    assert_eq!(
+        messages(&diagnostics, 3),
+        ["?0 : ℕ", "?1 : ℕ", "?2 : ℕ", "?3 : ℕ"]
+    );
+    assert!(
+        !client
+            .received
+            .iter()
+            .any(|m| m["method"] == "workspace/applyEdit")
+    );
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

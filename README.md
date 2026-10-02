@@ -65,6 +65,14 @@ uses when they are switched on:
 `combined` keeps the tree-sitter highlighting underneath, for text Agda has not
 seen yet (lines typed since the last save); `full` shows only Agda's.
 
+## Goals
+
+Opening or saving a file loads it in Agda. Goals then show their types as
+diagnostics, hover shows a goal's type and context, and a lone `?` becomes
+`{!  !}`. The code actions on a goal (`cmd-.` on macOS, `ctrl-.` on Linux)
+give, refine, case split, auto and solve it, or solve all goals. After a case
+split, save the file to load the new clauses.
+
 ## Unicode input
 
 Type `\` and an abbreviation of Agda's Emacs mode (`\to`, `\all`, `\bN`,

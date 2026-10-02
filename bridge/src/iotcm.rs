@@ -90,6 +90,42 @@ pub fn refine(file: &Path, goal: u32, expr: &str) -> String {
     )
 }
 
+/// `Cmd_make_case <goal> noRange "<variables>"`: case split on the variables
+/// typed in a goal, or, with none, introduce the missing patterns or split on
+/// the result.
+pub fn make_case(file: &Path, goal: u32, variables: &str) -> String {
+    iotcm(
+        file,
+        &format!("Cmd_make_case {goal} noRange {}", haskell_quote(variables)),
+    )
+}
+
+/// `Cmd_autoOne AsIs <goal> noRange "<hints>"`: proof search for a goal. This
+/// is the syntax of Agda 2.7 and later, whose search is called Mimer; earlier
+/// versions take no `AsIs`.
+pub fn auto_one(file: &Path, goal: u32, hints: &str) -> String {
+    iotcm(
+        file,
+        &format!("Cmd_autoOne AsIs {goal} noRange {}", haskell_quote(hints)),
+    )
+}
+
+/// `Cmd_solveOne Simplified <goal> noRange ""`: the solution of a goal that
+/// unification already found. Like Emacs, `Simplified` for one goal and
+/// `AsIs` for all of them.
+pub fn solve_one(file: &Path, goal: u32) -> String {
+    iotcm(
+        file,
+        &format!("Cmd_solveOne Simplified {goal} noRange \"\""),
+    )
+}
+
+/// `Cmd_solveAll AsIs`: the solutions of all goals that unification already
+/// found.
+pub fn solve_all(file: &Path) -> String {
+    iotcm(file, "Cmd_solveAll AsIs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +160,20 @@ mod tests {
             give(file, 3, "suc n"),
             r#"IOTCM "/tmp/A.agda" NonInteractive Direct (Cmd_give WithoutForce 3 noRange "suc n")"#
         );
+        let envelope =
+            |command: &str| format!(r#"IOTCM "/tmp/A.agda" NonInteractive Direct ({command})"#);
+        assert_eq!(
+            make_case(file, 0, "n m"),
+            envelope(r#"Cmd_make_case 0 noRange "n m""#)
+        );
+        assert_eq!(
+            auto_one(file, 1, ""),
+            envelope(r#"Cmd_autoOne AsIs 1 noRange """#)
+        );
+        assert_eq!(
+            solve_one(file, 5),
+            envelope(r#"Cmd_solveOne Simplified 5 noRange """#)
+        );
+        assert_eq!(solve_all(file), envelope("Cmd_solveAll AsIs"));
     }
 }

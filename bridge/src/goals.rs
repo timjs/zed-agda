@@ -6,6 +6,7 @@
 //! shrink it, and edits that touch its delimiters remove it (the same rule as
 //! agda2-vscode's `adjustRangeContaining`).
 
+use crate::protocol::MakeCaseVariant;
 use crate::text::Change;
 
 /// The text Agda's Emacs mode puts in place of a lone `?`.
@@ -107,6 +108,66 @@ fn is_name_char(ch: Option<char>) -> bool {
     }
 }
 
+/// The text a case split on `goal` replaces, as a half-open range of char
+/// offsets, and its replacement: Agda's new `clauses`, with their lone `?`s
+/// expanded. Ported from Emacs's `agda2-make-case-action` and
+/// `agda2-make-case-action-extendlam`, which assume the goal is on one line.
+pub fn case_split(
+    text: &str,
+    goal: &Goal,
+    variant: MakeCaseVariant,
+    clauses: &[String],
+) -> (usize, usize, String) {
+    let chars: Vec<char> = text.chars().collect();
+    let line_start = chars[..goal.start]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |i| i + 1);
+    let indent: String = chars[line_start..]
+        .iter()
+        .take_while(|&&c| c == ' ' || c == '\t')
+        .collect();
+    let code_start = line_start + indent.chars().count();
+    let clauses: Vec<String> = clauses.iter().map(|c| expand_question_marks(c)).collect();
+    let next_line = format!("\n{indent}");
+
+    match variant {
+        // The whole line of the goal, after its indentation, becomes the
+        // clauses, one per line.
+        MakeCaseVariant::Function => {
+            let mut line_end = chars[goal.start..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map_or(chars.len(), |i| goal.start + i);
+            if line_end > code_start && chars[line_end - 1] == '\r' {
+                line_end -= 1;
+            }
+            (code_start, line_end, clauses.join(&next_line))
+        }
+        // Only the clause of the goal, up to the goal's end: in `λ { … }` it
+        // starts after the `{` or the `;` before it, and the clauses are
+        // separated by `;`; in `λ where` it is the whole line.
+        MakeCaseVariant::ExtendedLambda => {
+            let mut start = goal.start;
+            let mut depth = 0i32;
+            let before = |i: usize| i.checked_sub(1).map(|i| chars[i]);
+            while before(start) != Some(';') && depth >= 0 && start > code_start {
+                start -= 1;
+                match before(start) {
+                    Some('}') => depth += 1,
+                    Some('{') => depth -= 1,
+                    _ => {}
+                }
+            }
+            if start == code_start {
+                (start, goal.end, clauses.join(&next_line))
+            } else {
+                (start, goal.end, format!(" {}", clauses.join(" ; ")))
+            }
+        }
+    }
+}
+
 /// Char offsets (relative to `text`) where [`GOAL_MARKER`]s start.
 pub fn marker_offsets(text: &str) -> Vec<usize> {
     let chars: Vec<char> = text.chars().collect();
@@ -199,5 +260,86 @@ mod tests {
         assert_eq!(expand_question_marks("(? , ?)"), "({!  !} , {!  !})");
         assert_eq!(expand_question_marks("_≟?_ x"), "_≟?_ x");
         assert_eq!(marker_offsets("suc {!  !} {!  !}"), vec![4, 11]);
+    }
+
+    /// Case split the first `{! … !}` in `text` into `clauses`.
+    fn split(text: &str, variant: MakeCaseVariant, clauses: &[&str]) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let find = |pattern: [char; 2]| chars.windows(2).position(|w| w == pattern).unwrap();
+        let goal = Goal {
+            id: 0,
+            start: find(['{', '!']),
+            end: find(['!', '}']) + 2,
+        };
+        let clauses: Vec<String> = clauses.iter().map(|c| c.to_string()).collect();
+        let (start, end, replacement) = case_split(text, &goal, variant, &clauses);
+        chars[..start]
+            .iter()
+            .copied()
+            .chain(replacement.chars())
+            .chain(chars[end..].iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn case_split_replaces_the_line_of_a_function_clause() {
+        // The clauses Agda 2.8.0 sends for `n + m = {! n !}`.
+        let clauses = ["zero + m = ?", "suc n + m = ?"];
+        assert_eq!(
+            split(
+                "_+_ : ℕ → ℕ → ℕ\nn + m = {! n !}\nx = y\n",
+                MakeCaseVariant::Function,
+                &clauses
+            ),
+            "_+_ : ℕ → ℕ → ℕ\nzero + m = {!  !}\nsuc n + m = {!  !}\nx = y\n"
+        );
+        // In a `where` block every clause keeps the indentation, and the
+        // rest of the line goes, as in Emacs.
+        assert_eq!(
+            split(
+                "  where\n    n + m = {! n !} -- todo\n",
+                MakeCaseVariant::Function,
+                &clauses
+            ),
+            "  where\n    zero + m = {!  !}\n    suc n + m = {!  !}\n"
+        );
+        // A Windows line end stays.
+        assert_eq!(
+            split("n + m = {! n !}\r\n", MakeCaseVariant::Function, &clauses),
+            "zero + m = {!  !}\nsuc n + m = {!  !}\r\n"
+        );
+    }
+
+    #[test]
+    fn case_split_replaces_one_clause_of_an_extended_lambda() {
+        // The clauses Agda 2.8.0 sends for `λ { x → {! x !} }`.
+        let clauses = ["zero → ?", "(suc x) → ?"];
+        assert_eq!(
+            split(
+                "f = λ { x → {! x !} }\n",
+                MakeCaseVariant::ExtendedLambda,
+                &clauses
+            ),
+            "f = λ { zero → {!  !} ; (suc x) → {!  !} }\n"
+        );
+        // Only the clause after the last `;`, and braces of implicit
+        // arguments are skipped.
+        assert_eq!(
+            split(
+                "f = λ { zero → zero ; {y} x → {! x !} }",
+                MakeCaseVariant::ExtendedLambda,
+                &["{y} zero → ?", "{y} (suc x) → ?"]
+            ),
+            "f = λ { zero → zero ; {y} zero → {!  !} ; {y} (suc x) → {!  !} }"
+        );
+        // In `λ where`, the clauses go on lines of their own.
+        assert_eq!(
+            split(
+                "g = λ where\n  x → {! x !}\nh = g\n",
+                MakeCaseVariant::ExtendedLambda,
+                &clauses
+            ),
+            "g = λ where\n  zero → {!  !}\n  (suc x) → {!  !}\nh = g\n"
+        );
     }
 }

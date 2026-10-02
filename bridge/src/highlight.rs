@@ -198,6 +198,25 @@ pub fn adjust(spans: &mut Vec<Span>, change: &Change) {
     });
 }
 
+/// Like [`adjust`], but spans that cover exactly the replaced text cover its
+/// replacement, as the hole of a lone `?` does when the bridge expands it to
+/// `{!  !}`.
+pub fn adjust_stretching(spans: &mut Vec<Span>, change: &Change) {
+    spans.retain_mut(|span| {
+        if (span.start, span.end) == (change.start, change.old_end) {
+            span.end = change.start + change.new_len;
+            return true;
+        }
+        match change.follow(span.start, span.end) {
+            Some((start, end)) => {
+                (span.start, span.end) = (start, end);
+                true
+            }
+            None => false,
+        }
+    });
+}
+
 /// Pieces that do not overlap: each with the highest-priority kind and all
 /// modifiers of the spans covering it. Neighbouring pieces that look the
 /// same are joined.
@@ -438,6 +457,34 @@ mod tests {
         assert_eq!(
             decode(&tokens(&spans, "datta ℕ")),
             [(0, 6, 1, "type", vec![])]
+        );
+    }
+
+    #[test]
+    fn a_hole_stretches_when_its_question_mark_is_expanded() {
+        // `p = ? ; q`: the hole of `?` and the name after it.
+        let entries = [entry([5, 6], &["hole"]), entry([9, 10], &["function"])];
+        let expand = Change {
+            start: 4,
+            old_end: 5,
+            new_len: 6,
+        };
+        let mut spans = from_highlighting(&entries);
+        adjust_stretching(&mut spans, &expand);
+        assert_eq!(
+            decode(&tokens(&spans, "p = {!  !} ; q")),
+            [
+                (0, 4, 6, "region", vec!["hole"]),
+                (0, 13, 1, "function", vec![])
+            ]
+        );
+        // The ordinary adjustment drops the hole, as for any edit that
+        // touches a span.
+        let mut spans = from_highlighting(&entries);
+        adjust(&mut spans, &expand);
+        assert_eq!(
+            decode(&tokens(&spans, "p = {!  !} ; q")),
+            [(0, 13, 1, "function", vec![])]
         );
     }
 }

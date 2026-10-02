@@ -65,6 +65,17 @@ pub enum Response {
         interaction_point: InteractionPoint,
         give_result: GiveResult,
     },
+    /// The clauses that replace the clause of a goal after a case split.
+    /// They contain lone `?`s for the new goals.
+    MakeCase {
+        interaction_point: InteractionPoint,
+        variant: MakeCaseVariant,
+        clauses: Vec<String>,
+    },
+    /// The goals that unification already solved, for solve.
+    SolveAll {
+        solutions: Vec<Solution>,
+    },
     /// Highlighting for part of the loaded file. The bridge asks for it
     /// `Direct`, so it arrives inline, in several chunks that may repeat
     /// entries.
@@ -127,6 +138,23 @@ pub struct Position {
     pub pos: usize,
 }
 
+/// Where the goal of a case split is: a function clause, or a clause of an
+/// extended lambda (`λ { … }` or `λ where`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum MakeCaseVariant {
+    Function,
+    ExtendedLambda,
+}
+
+/// One goal and the expression unification found for it. Unlike elsewhere,
+/// the goal is only its number.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Solution {
+    pub interaction_point: u32,
+    pub expression: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum GiveResult {
@@ -157,6 +185,8 @@ pub enum DisplayInfo {
         interaction_point: InteractionPoint,
         goal_info: GoalInfo,
     },
+    /// What auto says when it found nothing, as in "No solution found".
+    Auto { info: String },
     #[serde(other)]
     Other,
 }
@@ -316,5 +346,52 @@ mod tests {
         assert!(info.payload[0].definition_site.is_none());
         let site = info.payload[1].definition_site.as_ref().unwrap();
         assert_eq!((site.filepath.as_str(), site.position), ("/x/Nat.agda", 24));
+    }
+
+    #[test]
+    fn parses_goal_command_responses_from_agda_2_8() {
+        // Agda 2.8.0's answers to case split, solve and a failed auto.
+        let make_case = r#"{"clauses":["zero + m = ?","suc n + m = ?"],"interactionPoint":{"id":0,"range":[{"end":{"col":16,"line":8,"pos":98},"start":{"col":9,"line":8,"pos":91}}]},"kind":"MakeCase","variant":"Function"}"#;
+        match parse_line(make_case).unwrap() {
+            Response::MakeCase {
+                interaction_point,
+                variant,
+                clauses,
+            } => {
+                assert_eq!(interaction_point.id, 0);
+                assert_eq!(variant, MakeCaseVariant::Function);
+                assert_eq!(clauses, ["zero + m = ?", "suc n + m = ?"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let lambda = r#"{"clauses":["zero → ?","(suc x) → ?"],"interactionPoint":{"id":3,"range":[]},"kind":"MakeCase","variant":"ExtendedLambda"}"#;
+        assert!(matches!(
+            parse_line(lambda).unwrap(),
+            Response::MakeCase {
+                variant: MakeCaseVariant::ExtendedLambda,
+                ..
+            }
+        ));
+
+        let solve = r#"{"kind":"SolveAll","solutions":[{"expression":"ℕ","interactionPoint":5}]}"#;
+        let Response::SolveAll { solutions } = parse_line(solve).unwrap() else {
+            panic!("expected SolveAll");
+        };
+        assert_eq!(solutions.len(), 1);
+        assert_eq!(
+            (
+                solutions[0].interaction_point,
+                solutions[0].expression.as_str()
+            ),
+            (5, "ℕ")
+        );
+
+        let auto = r#"{"info":{"info":"No solution found","kind":"Auto"},"kind":"DisplayInfo"}"#;
+        let Response::DisplayInfo { info } = parse_line(auto).unwrap() else {
+            panic!("expected DisplayInfo");
+        };
+        assert!(
+            matches!(DisplayInfo::parse(&info), DisplayInfo::Auto { info } if info == "No solution found")
+        );
     }
 }
