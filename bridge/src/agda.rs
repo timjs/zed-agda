@@ -92,9 +92,8 @@ impl Agda {
             match self.events.recv().await {
                 Some(Event::Prompt) => return Ok(responses),
                 Some(Event::Line(line)) => match parse_line(&line) {
-                    None => {}
-                    Some(Ok(response)) => responses.push(response),
-                    Some(Err(err)) => eprintln!("agda-bridge: unparsed output ({err}): {line}"),
+                    Ok(response) => responses.push(response),
+                    Err(err) => eprintln!("agda-bridge: unparsed output ({err}): {line}"),
                 },
                 None => return Err(io::Error::other("Agda exited")),
             }

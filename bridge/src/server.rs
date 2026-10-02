@@ -16,9 +16,10 @@ use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
 use crate::agda::Agda;
 use crate::goals::{self, GOAL_MARKER, Goal};
+use crate::links::{self, Link, Target};
 use crate::output::Output;
 use crate::protocol::{
-    DisplayInfo, GiveResult, GoalInfo, InteractionPoint, Response, message_text,
+    DisplayInfo, GiveResult, GoalInfo, HighlightingEntry, InteractionPoint, Response, message_text,
 };
 use crate::text::{self, Change};
 use crate::{iotcm, location, render};
@@ -67,6 +68,8 @@ struct Document {
     version: i32,
     goals: Vec<Goal>,
     goal_types: HashMap<u32, String>,
+    /// Names and their definitions, from the last load's highlighting.
+    links: Vec<Link>,
     /// Errors and warnings from the last load, as diagnostics.
     problems: Vec<Diagnostic>,
     /// The text Agda last loaded, to skip reloading identical text.
@@ -103,6 +106,7 @@ struct Outcome {
     give: Option<(u32, GiveResult)>,
     goal_info: Option<(u32, GoalInfo)>,
     displays: Vec<Value>,
+    highlighting: Vec<HighlightingEntry>,
 }
 
 impl Outcome {
@@ -151,6 +155,11 @@ impl Outcome {
                         DisplayInfo::Other => {}
                     }
                     outcome.displays.push(info);
+                }
+                Response::HighlightingInfo { info } => {
+                    outcome
+                        .highlighting
+                        .extend(info.into_iter().flat_map(|info| info.payload));
                 }
                 Response::Other => {}
             }
@@ -312,6 +321,7 @@ impl Bridge {
                 })
             })
             .collect();
+        let mut links = links::from_highlighting(&outcome.highlighting, path);
         let file = path.to_string_lossy();
         let mut problems: Vec<Diagnostic> = outcome
             .errors
@@ -334,8 +344,10 @@ impl Bridge {
                 });
             if let Some(change) = text::single_change(&snapshot, &document.text) {
                 goals::adjust(&mut goals, &snapshot, &change);
+                links::adjust(&mut links, &change);
             }
             document.goals = goals;
+            document.links = links;
             document.goal_types = outcome.goal_types.clone();
             document.problems = problems;
             document.loaded_text = Some(snapshot);
@@ -444,6 +456,7 @@ impl Bridge {
             };
             let old_text = std::mem::replace(&mut document.text, new_text);
             goals::adjust(&mut document.goals, &old_text, &change);
+            links::adjust(&mut document.links, &change);
 
             // Goals created by the result (`suc ?`) get the ids Agda did not know before.
             if let Some(points) = &outcome.interaction_points {
@@ -649,6 +662,7 @@ impl LanguageServer for Backend {
                     },
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
@@ -712,6 +726,7 @@ impl LanguageServer for Backend {
         }
         if let Some(edit) = text::single_change(&document.text, &change.text) {
             goals::adjust(&mut document.goals, &document.text, &edit);
+            links::adjust(&mut document.links, &edit);
         }
         document.text = change.text;
         document.version = params.text_document.version;
@@ -765,6 +780,47 @@ impl LanguageServer for Backend {
             }),
             range: Some(range),
         }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> RpcResult<Option<GotoDefinitionResponse>> {
+        let request = params.text_document_position_params;
+        let Some(path) = path_of(&request.text_document.uri) else {
+            return Ok(None);
+        };
+        let (target_path, target_position) = {
+            let documents = self.0.documents.lock().unwrap();
+            let Some(document) = documents.get(&path) else {
+                return Ok(None);
+            };
+            let offset = text::offset_of(&document.text, request.position);
+            let Some(link) = links::link_at(&document.links, offset) else {
+                return Ok(None);
+            };
+            match &link.target {
+                Target::Here(target) => {
+                    let at = text::position_of(&document.text, *target);
+                    let location = Location::new(request.text_document.uri, Range::new(at, at));
+                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                }
+                Target::File { path, position } => (path.clone(), *position),
+            }
+        };
+        // Agda's offsets refer to the file as it was on disk when it was
+        // loaded, so read it from disk rather than from an open buffer.
+        let (Ok(contents), Some(uri)) = (
+            tokio::fs::read_to_string(&target_path).await,
+            uri_of(&target_path),
+        ) else {
+            return Ok(None);
+        };
+        let at = text::position_of(&contents, target_position.saturating_sub(1));
+        Ok(Some(GotoDefinitionResponse::Scalar(Location::new(
+            uri,
+            Range::new(at, at),
+        ))))
     }
 
     async fn code_action(&self, params: CodeActionParams) -> RpcResult<Option<CodeActionResponse>> {

@@ -8,6 +8,7 @@
 mod agda;
 mod goals;
 mod iotcm;
+mod links;
 mod location;
 mod output;
 mod protocol;

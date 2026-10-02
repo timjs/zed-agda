@@ -178,6 +178,20 @@ impl Client {
             })
             .unwrap_or_default()
     }
+
+    /// The definition of the name at `position`: a location, or null.
+    fn definition(&mut self, uri: &str, position: Value) -> Value {
+        self.request(
+            "textDocument/definition",
+            json!({ "textDocument": { "uri": uri }, "position": position }),
+        )
+    }
+}
+
+/// An LSP location at a single position.
+fn location(uri: &str, line: u32, character: u32) -> Value {
+    let at = json!({ "line": line, "character": character });
+    json!({ "uri": uri, "range": { "start": at, "end": at } })
 }
 
 fn find_agda() -> Option<String> {
@@ -248,7 +262,7 @@ fn drives_agda_through_lsp_and_debug_client() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    for name in ["Spike.agda", "Bad.agda"] {
+    for name in ["Spike.agda", "Bad.agda", "Nat.agda", "Uses.agda"] {
         std::fs::copy(fixtures.join(name), root.join(name)).unwrap();
     }
     let socket = root.join("bridge.sock");
@@ -316,6 +330,13 @@ fn drives_agda_through_lsp_and_debug_client() {
         ""
     );
 
+    // Go to definition in the same file: `ℕ` in the type of `_+_` leads to
+    // `data ℕ` on line 3.
+    assert_eq!(
+        client.definition(&spike_uri, position_of(&text, "ℕ → ℕ → ℕ", 0)),
+        location(&spike_uri, 2, 5)
+    );
+
     // Code actions on a filled hole offer give, refine, showing the goal and
     // the output file; a line without goals or problems offers nothing.
     let titles = client.code_actions(&spike_uri, position_of(&text, "suc (n", 0));
@@ -375,6 +396,13 @@ fn drives_agda_through_lsp_and_debug_client() {
     assert!(
         hover.contains("Goal ?3") && hover.contains("n : ℕ"),
         "{hover}"
+    );
+
+    // Go to definition after unsaved edits: the give and refine above moved
+    // both the use of `𝔹` on line 18 and its definition on line 14.
+    assert_eq!(
+        client.definition(&spike_uri, position_of(&text, "𝔹) →", 0)),
+        location(&spike_uri, 13, 5)
     );
 
     // The debug client takes UTF-8 byte columns, and this line has a
@@ -474,6 +502,35 @@ fn drives_agda_through_lsp_and_debug_client() {
     );
     let shown = client.wait_for("showDocument", |m| m["method"] == "window/showDocument");
     assert_eq!(shown["params"]["uri"], uri(&output));
+
+    // Go to definition into another file: `Uses.agda` imports `Nat.agda`.
+    let uses = root.join("Uses.agda");
+    let uses_uri = uri(&uses);
+    let uses_text = std::fs::read_to_string(&uses).unwrap();
+    let nat_uri = uri(&root.join("Nat.agda"));
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uses_uri, "languageId": "agda", "version": 1, "text": uses_text } }),
+    );
+    client.diagnostics(&uses_uri, |d| d.is_empty());
+    assert_eq!(
+        client.definition(&uses_uri, position_of(&uses_text, "suc", 0)),
+        location(&nat_uri, 4, 2)
+    );
+    assert_eq!(
+        client.definition(&uses_uri, position_of(&uses_text, "ℕ", 0)),
+        location(&nat_uri, 2, 5)
+    );
+    // `two` in its definition leads to its type signature, in this file.
+    assert_eq!(
+        client.definition(&uses_uri, position_of(&uses_text, "two =", 0)),
+        location(&uses_uri, 4, 0)
+    );
+    // Keywords have no definition.
+    assert_eq!(
+        client.definition(&uses_uri, position_of(&uses_text, "open", 0)),
+        Value::Null
+    );
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

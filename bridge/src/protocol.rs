@@ -65,18 +65,43 @@ pub enum Response {
         interaction_point: InteractionPoint,
         give_result: GiveResult,
     },
+    /// Highlighting for part of the loaded file. The bridge asks for it
+    /// `Direct`, so it arrives inline, in several chunks that may repeat
+    /// entries.
+    HighlightingInfo {
+        info: Option<Highlighting>,
+    },
     /// Everything else, such as `Status`, `RunningInfo` and `JumpToError`.
     #[serde(other)]
     Other,
 }
 
-/// Parse one line of Agda output. Highlighting payloads are skipped without
-/// being parsed, because they are large and the bridge does not use them yet.
-pub fn parse_line(line: &str) -> Option<Result<Response, serde_json::Error>> {
-    if line.contains(r#""kind":"HighlightingInfo""#) {
-        return None;
-    }
-    Some(serde_json::from_str(line))
+/// Parse one line of Agda output.
+pub fn parse_line(line: &str) -> Result<Response, serde_json::Error> {
+    serde_json::from_str(line)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Highlighting {
+    pub payload: Vec<HighlightingEntry>,
+}
+
+/// One highlighted stretch of the file, as a half-open range of 1-based code
+/// point offsets. Agda also sends `atoms` (what kind of name it is), which the
+/// bridge does not use yet.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HighlightingEntry {
+    pub range: [usize; 2],
+    pub definition_site: Option<DefinitionSite>,
+}
+
+/// Where a name is defined: a file and the 1-based code point offset of the
+/// start of the name in it (offset 1 for a module).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DefinitionSite {
+    pub filepath: String,
+    pub position: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -249,7 +274,7 @@ mod tests {
     #[test]
     fn parses_responses_seen_from_agda_2_8() {
         let give = r#"{"giveResult":{"str":"suc (n + m)"},"interactionPoint":{"id":0,"range":[{"end":{"col":30,"line":9,"pos":126},"start":{"col":13,"line":9,"pos":109}}]},"kind":"GiveAction"}"#;
-        match parse_line(give).unwrap().unwrap() {
+        match parse_line(give).unwrap() {
             Response::GiveAction {
                 interaction_point,
                 give_result: GiveResult::Str { str },
@@ -261,7 +286,7 @@ mod tests {
         }
 
         let error = r#"{"info":{"error":{"message":"/x/Bad.agda:7.5-8: error: [UnequalTerms]\nSet₁ !=< ℕ"},"kind":"Error","warnings":[]},"kind":"DisplayInfo"}"#;
-        let Response::DisplayInfo { info } = parse_line(error).unwrap().unwrap() else {
+        let Response::DisplayInfo { info } = parse_line(error).unwrap() else {
             panic!("expected DisplayInfo");
         };
         match DisplayInfo::parse(&info) {
@@ -274,12 +299,18 @@ mod tests {
         }
 
         let status = r#"{"kind":"Status","status":{"checked":false}}"#;
-        assert!(matches!(
-            parse_line(status).unwrap().unwrap(),
-            Response::Other
-        ));
+        assert!(matches!(parse_line(status).unwrap(), Response::Other));
 
-        let highlighting = r#"{"direct":true,"info":{},"kind":"HighlightingInfo"}"#;
-        assert!(parse_line(highlighting).is_none());
+        // Shortened from Agda 2.8.0's answer when loading `Uses.agda`.
+        let highlighting = r#"{"direct":true,"info":{"payload":[{"atoms":["keyword"],"definitionSite":null,"note":"","range":[1,7],"tokenBased":"TokenBased"},{"atoms":["datatype"],"definitionSite":{"filepath":"/x/Nat.agda","position":24},"note":"","range":[43,44],"tokenBased":"NotOnlyTokenBased"}],"remove":false},"kind":"HighlightingInfo"}"#;
+        let Response::HighlightingInfo { info: Some(info) } = parse_line(highlighting).unwrap()
+        else {
+            panic!("expected HighlightingInfo");
+        };
+        assert_eq!(info.payload.len(), 2);
+        assert_eq!(info.payload[0].range, [1, 7]);
+        assert!(info.payload[0].definition_site.is_none());
+        let site = info.payload[1].definition_site.as_ref().unwrap();
+        assert_eq!((site.filepath.as_str(), site.position), ("/x/Nat.agda", 24));
     }
 }
