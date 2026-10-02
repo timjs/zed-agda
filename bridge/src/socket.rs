@@ -1,10 +1,11 @@
-//! Requests from Zed tasks.
+//! A debugging client for a running bridge.
 //!
-//! Zed extensions cannot define commands or keybindings, but they can ship
-//! tasks, and users can bind keys to tasks. A task runs
-//! `agda-bridge client <command> --root "$ZED_WORKTREE_ROOT" --file "$ZED_FILE"
-//! --row $ZED_ROW --column $ZED_COLUMN`, which sends one JSON line to the
-//! bridge serving that worktree over a Unix socket and prints the reply.
+//! `agda-bridge client <command> --root DIR --file FILE [--row N --column N]`
+//! sends one JSON line to the bridge serving that worktree over a Unix socket
+//! and prints the reply, so Agda commands can be tried from a terminal while
+//! Zed is running. Rows and columns are 1-based, with columns in UTF-8 bytes,
+//! like Zed's `ZED_ROW` and `ZED_COLUMN` task variables, so a user-defined Zed
+//! task can call it too.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -58,7 +59,7 @@ pub fn serve(bridge: Arc<Bridge>, root: PathBuf) {
         }
     };
     eprintln!(
-        "agda-bridge: listening for task requests on {}",
+        "agda-bridge: listening for client requests on {}",
         path.display()
     );
     tokio::spawn(async move {
@@ -66,7 +67,7 @@ pub fn serve(bridge: Arc<Bridge>, root: PathBuf) {
             let bridge = bridge.clone();
             tokio::spawn(async move {
                 if let Err(err) = handle(bridge, stream).await {
-                    eprintln!("agda-bridge: task request failed: {err}");
+                    eprintln!("agda-bridge: client request failed: {err}");
                 }
             });
         }
@@ -75,7 +76,7 @@ pub fn serve(bridge: Arc<Bridge>, root: PathBuf) {
 
 #[cfg(not(unix))]
 pub fn serve(_bridge: Arc<Bridge>, _root: PathBuf) {
-    eprintln!("agda-bridge: task requests are not supported on this platform yet");
+    eprintln!("agda-bridge: client requests are not supported on this platform yet");
 }
 
 #[cfg(unix)]
@@ -91,7 +92,7 @@ async fn handle(bridge: Arc<Bridge>, stream: tokio::net::UnixStream) -> io::Resu
         Err(err) => Err(format!("Bad request: {err}")),
     };
     if let Err(message) = &result {
-        // The task's terminal is usually hidden, so tell the user in Zed too.
+        // Nobody may be watching the client's output, so tell the user in Zed too.
         bridge
             .client
             .show_message(MessageType::WARNING, message)
@@ -205,6 +206,6 @@ async fn send(path: &Path, request: &Request) -> io::Result<Reply> {
 #[cfg(not(unix))]
 async fn send(_path: &Path, _request: &Request) -> io::Result<Reply> {
     Err(io::Error::other(
-        "task requests are not supported on this platform yet",
+        "client requests are not supported on this platform yet",
     ))
 }

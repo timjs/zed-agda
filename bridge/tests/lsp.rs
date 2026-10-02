@@ -19,8 +19,10 @@ struct Client {
     stdin: ChildStdin,
     incoming: Receiver<Value>,
     next_id: i64,
-    /// Every request and notification the server sent.
+    /// Requests and notifications from the server, cleared between steps.
     received: Vec<Value>,
+    /// Every request and notification the server sent, never cleared.
+    history: Vec<Value>,
 }
 
 impl Client {
@@ -65,6 +67,7 @@ impl Client {
             incoming,
             next_id: 1,
             received: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -98,6 +101,7 @@ impl Client {
         }
         if message.get("method").is_some() {
             self.received.push(message.clone());
+            self.history.push(message.clone());
         }
         message
     }
@@ -152,6 +156,27 @@ impl Client {
             .as_str()
             .unwrap_or("")
             .to_string()
+    }
+
+    /// The titles of the code actions offered at `position`.
+    fn code_actions(&mut self, uri: &str, position: Value) -> Vec<String> {
+        let result = self.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": uri },
+                "range": { "start": position, "end": position },
+                "context": { "diagnostics": [] },
+            }),
+        );
+        result
+            .as_array()
+            .map(|actions| {
+                actions
+                    .iter()
+                    .map(|action| action["title"].as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -212,7 +237,7 @@ fn messages(diagnostics: &[Value], severity: u64) -> Vec<String> {
 }
 
 #[test]
-fn drives_agda_through_lsp_and_tasks() {
+fn drives_agda_through_lsp_and_debug_client() {
     let Some(agda) = find_agda() else {
         eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
         return;
@@ -291,22 +316,16 @@ fn drives_agda_through_lsp_and_tasks() {
         ""
     );
 
-    // Code actions on a filled hole offer give.
-    let actions = client.request(
-        "textDocument/codeAction",
-        json!({
-            "textDocument": { "uri": spike_uri },
-            "range": { "start": position_of(&text, "suc (n", 0), "end": position_of(&text, "suc (n", 0) },
-            "context": { "diagnostics": [] },
-        }),
+    // Code actions on a filled hole offer give and the output file; a line
+    // without goals or problems offers nothing.
+    let titles = client.code_actions(&spike_uri, position_of(&text, "suc (n", 0));
+    assert!(titles.contains(&"Agda: give ?0".into()), "{titles:?}");
+    assert!(
+        titles.contains(&"Agda: open output file".into()),
+        "{titles:?}"
     );
-    let titles: Vec<&str> = actions
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|a| a["title"].as_str().unwrap())
-        .collect();
-    assert!(titles.contains(&"Agda: give ?0"), "{titles:?}");
+    let titles = client.code_actions(&spike_uri, json!({ "line": 0, "character": 0 }));
+    assert!(titles.is_empty(), "{titles:?}");
 
     // Give goes through executeCommand and comes back as workspace/applyEdit.
     client.received.clear();
@@ -354,11 +373,11 @@ fn drives_agda_through_lsp_and_tasks() {
         "{hover}"
     );
 
-    // The task client: ZED_COLUMN counts UTF-8 bytes, and this line has a
+    // The debug client takes UTF-8 byte columns, and this line has a
     // two-byte `λ`, a four-byte `𝔹` and a three-byte `→` before the hole.
     let line = text.lines().position(|l| l.starts_with("not = ")).unwrap();
     let column = text.lines().nth(line).unwrap().find("{!").unwrap() + 3;
-    let run_task = |command: &str, row: usize, column: usize| {
+    let run_client = |command: &str, row: usize, column: usize| {
         Command::new(env!("CARGO_BIN_EXE_agda-bridge"))
             .args(["client", command, "--root"])
             .arg(&root)
@@ -373,7 +392,7 @@ fn drives_agda_through_lsp_and_tasks() {
             .output()
             .unwrap()
     };
-    let result = run_task("goal", line, column);
+    let result = run_client("goal", line, column);
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
         result.status.success(),
@@ -383,12 +402,22 @@ fn drives_agda_through_lsp_and_tasks() {
     assert!(stdout.contains("Goal ?2"), "{stdout}");
     assert!(std::fs::read_to_string(&output).unwrap().contains("b : 𝔹"));
 
-    // Outside a goal the task fails, and the user is told in Zed.
+    // Outside a goal the client fails, and the user is told in Zed.
     client.received.clear();
-    let result = run_task("give", 1, 1);
+    let result = run_client("give", 1, 1);
     assert!(!result.status.success());
     let shown = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
     assert_eq!(shown["params"]["message"], "The cursor is not in a goal.");
+
+    // Zed sends `didSave` for every file saved in the worktree, whatever its
+    // language; saving Markdown must not reach Agda.
+    let notes = root.join("TODO.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    let notes_uri = uri(&notes);
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": notes_uri } }),
+    );
 
     // A type error becomes an Error diagnostic on the right range.
     let bad = root.join("Bad.agda");
@@ -412,6 +441,26 @@ fn drives_agda_through_lsp_and_tasks() {
             .starts_with("error: [UnequalTerms]"),
         "{error}"
     );
+    // The Markdown save above came first, so a load of it would have been
+    // reported before this one.
+    assert!(
+        !client
+            .history
+            .iter()
+            .any(|m| m["params"]["uri"] == notes_uri),
+        "the Markdown file was sent to Agda"
+    );
+
+    // On an error line, the output file can be reopened.
+    let titles = client.code_actions(&bad_uri, json!({ "line": 6, "character": 4 }));
+    assert_eq!(titles, ["Agda: open output file"]);
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": "agda.openOutput", "arguments": [] }),
+    );
+    let shown = client.wait_for("showDocument", |m| m["method"] == "window/showDocument");
+    assert_eq!(shown["params"]["uri"], uri(&output));
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

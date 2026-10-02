@@ -42,7 +42,8 @@ The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
 
 `outputFile` is the Markdown file where Agda's answers appear (the equivalent
 of Emacs's `*Agda information*` buffer), relative to the project root. Add it
-to your `.gitignore`.
+to your `.gitignore`. It opens once by itself; after closing it, reopen it with
+the code action "Agda: open output file" on a goal or an error.
 
-Emacs-style keybindings are set up through tasks; see the keymap snippet in
-[`docs/PHASE0.md`](docs/PHASE0.md).
+For debugging, `agda-bridge client` sends a command to the running bridge from
+a terminal; run it without arguments for its usage.

@@ -3,7 +3,7 @@
 //! Language Server. See `docs/PLAN.md` in the repository.
 //!
 //! - `agda-bridge` (or `agda-bridge --stdio`): run the language server.
-//! - `agda-bridge client …`: send a command from a Zed task to the server.
+//! - `agda-bridge client …`: send a command to a running server, for debugging.
 
 mod agda;
 mod goals;
@@ -25,7 +25,7 @@ async fn main() {
         Some("--version") => println!("agda-bridge {}", env!("CARGO_PKG_VERSION")),
         Some(other) => {
             eprintln!(
-                "unknown argument `{other}`; run without arguments for the language server, or `client` for task requests"
+                "unknown argument `{other}`; run without arguments for the language server, or `client` to send a command to a running server"
             );
             std::process::exit(2);
         }

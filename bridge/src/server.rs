@@ -1,7 +1,7 @@
 //! The language server: LSP towards Zed, `--interaction-json` towards Agda.
 //!
 //! [`Bridge`] holds all state and implements the Agda operations (load, goal
-//! information, give, refine). The LSP handlers in [`Backend`] and the task
+//! information, give, refine). The LSP handlers in [`Backend`] and the debug
 //! socket in `socket.rs` both call into it.
 
 use std::collections::{HashMap, HashSet};
@@ -26,6 +26,26 @@ use crate::{iotcm, location, render};
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
 pub const COMMAND_GOAL: &str = "agda.goal";
+pub const COMMAND_OPEN_OUTPUT: &str = "agda.openOutput";
+
+/// The extensions Agda accepts, as listed in its `InvalidExtensionError`.
+const AGDA_EXTENSIONS: &[&str] = &[
+    ".agda",
+    ".lagda",
+    ".lagda.rst",
+    ".lagda.tex",
+    ".lagda.md",
+    ".lagda.org",
+    ".lagda.tree",
+    ".lagda.typ",
+];
+
+fn is_agda_source(path: &Path) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    AGDA_EXTENSIONS
+        .iter()
+        .any(|extension| name.ends_with(extension))
+}
 
 pub async fn run() {
     let (service, socket) = LspService::new(|client| Backend(Arc::new(Bridge::new(client))));
@@ -238,6 +258,9 @@ impl Bridge {
 
     /// Type-check `path` with `Cmd_load`, then refresh goals and diagnostics.
     pub async fn load(&self, path: &Path) -> Result<String, String> {
+        if !is_agda_source(path) {
+            return Err(format!("{} is not an Agda file.", path.display()));
+        }
         let snapshot = match self.documents.lock().unwrap().get(path) {
             Some(document) => document.text.clone(),
             None => std::fs::read_to_string(path)
@@ -505,24 +528,40 @@ impl Bridge {
             .await;
     }
 
+    /// Write the output file. Zed is asked to open it only after the first
+    /// write: the bridge cannot tell whether the user closed it since, and
+    /// asking again would open it in the pane being edited (see
+    /// [`Bridge::open_output`]).
     pub async fn show_output(&self, title: &str, source: &Path, body: &str) {
         let Some(output) = self.output.get() else {
             return;
         };
         match output.write(title, Some(source), body).await {
-            Ok(true) => {
-                if let Some(uri) = uri_of(&output.path) {
-                    let params = ShowDocumentParams {
-                        uri,
-                        external: Some(false),
-                        take_focus: Some(false),
-                        selection: None,
-                    };
-                    let _ = self.client.show_document(params).await;
-                }
-            }
+            Ok(true) => self.open_output().await,
             Ok(false) => {}
             Err(err) => eprintln!("agda-bridge: cannot write {}: {err}", output.path.display()),
+        }
+    }
+
+    /// Ask Zed to open the output file, without taking focus. Zed opens it in
+    /// the active pane, unless the user enabled `reveal_if_open`, in which
+    /// case an open copy in another pane is revealed instead.
+    pub async fn open_output(&self) {
+        let Some(output) = self.output.get() else {
+            return;
+        };
+        if let Err(err) = output.ensure_exists().await {
+            eprintln!("agda-bridge: cannot write {}: {err}", output.path.display());
+            return;
+        }
+        if let Some(uri) = uri_of(&output.path) {
+            let params = ShowDocumentParams {
+                uri,
+                external: Some(false),
+                take_focus: Some(false),
+                selection: None,
+            };
+            let _ = self.client.show_document(params).await;
         }
     }
 
@@ -616,6 +655,7 @@ impl LanguageServer for Backend {
                         COMMAND_GIVE.into(),
                         COMMAND_REFINE.into(),
                         COMMAND_GOAL.into(),
+                        COMMAND_OPEN_OUTPUT.into(),
                     ],
                     ..ExecuteCommandOptions::default()
                 }),
@@ -681,6 +721,12 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
+        // Zed sends `didSave` to every language server of the worktree, for
+        // every saved file whatever its language. Only load the documents Zed
+        // opened with this server, which are Agda files.
+        if !self.0.documents.lock().unwrap().contains_key(&path) {
+            return;
+        }
         let bridge = self.0.clone();
         tokio::spawn(async move { bridge.report(bridge.load(&path).await).await });
     }
@@ -726,42 +772,72 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&uri) else {
             return Ok(None);
         };
-        let (id, has_content) = {
+        let (goal, on_problem) = {
             let documents = self.0.documents.lock().unwrap();
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
             };
             let offset = text::offset_of(&document.text, params.range.start);
-            let Some(goal) = goals::goal_at(&document.goals, offset) else {
-                return Ok(None);
-            };
-            (goal.id, !goal.content(&document.text).is_empty())
+            let goal = goals::goal_at(&document.goals, offset)
+                .map(|goal| (goal.id, !goal.content(&document.text).is_empty()));
+            let line = params.range.start.line;
+            let on_problem = document
+                .problems
+                .iter()
+                .any(|problem| problem.range.start.line <= line && line <= problem.range.end.line);
+            (goal, on_problem)
         };
-        let action = |title: String, command: &str| {
+        let action = |title: String, command: &str, arguments: Vec<Value>, kind| {
             CodeActionOrCommand::CodeAction(CodeAction {
                 title: title.clone(),
-                kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                kind,
                 command: Some(Command {
                     title,
                     command: command.into(),
-                    arguments: Some(vec![json!(uri.as_str()), json!(id)]),
+                    arguments: Some(arguments),
                 }),
                 ..CodeAction::default()
             })
         };
         let mut actions = Vec::new();
-        if has_content {
-            actions.push(action(format!("Agda: give ?{id}"), COMMAND_GIVE));
+        if let Some((id, has_content)) = goal {
+            let goal_action = |title: String, command: &str| {
+                let arguments = vec![json!(uri.as_str()), json!(id)];
+                action(
+                    title,
+                    command,
+                    arguments,
+                    Some(CodeActionKind::REFACTOR_REWRITE),
+                )
+            };
+            if has_content {
+                actions.push(goal_action(format!("Agda: give ?{id}"), COMMAND_GIVE));
+            }
+            actions.push(goal_action(format!("Agda: refine ?{id}"), COMMAND_REFINE));
+            actions.push(goal_action(
+                format!("Agda: show goal ?{id} in output"),
+                COMMAND_GOAL,
+            ));
         }
-        actions.push(action(format!("Agda: refine ?{id}"), COMMAND_REFINE));
-        actions.push(action(
-            format!("Agda: show goal ?{id} in output"),
-            COMMAND_GOAL,
-        ));
-        Ok(Some(actions))
+        // Offered where output matters, not on every line, so Zed does not
+        // show a code action indicator everywhere.
+        if goal.is_some() || on_problem {
+            actions.push(action(
+                "Agda: open output file".into(),
+                COMMAND_OPEN_OUTPUT,
+                Vec::new(),
+                None,
+            ));
+        }
+        Ok((!actions.is_empty()).then_some(actions))
     }
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> RpcResult<Option<LSPAny>> {
+        if params.command == COMMAND_OPEN_OUTPUT {
+            let bridge = self.0.clone();
+            tokio::spawn(async move { bridge.open_output().await });
+            return Ok(None);
+        }
         let uri = params
             .arguments
             .first()

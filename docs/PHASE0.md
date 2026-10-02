@@ -2,8 +2,8 @@
 
 Phase 0 of the roadmap in [`PLAN.md`](PLAN.md) set out to prove the risky
 assumptions before building anything large. This document records what was
-built, what is now proven (and how), what was learned along the way, and the
-checks that only a person running Zed can do.
+built, what is now proven (and how), what was learned along the way, the
+checks that only a person running Zed can do, and their results.
 
 ## What was built
 
@@ -13,7 +13,7 @@ checks that only a person running Zed can do.
 | Protocol | `bridge/src/iotcm.rs`, `protocol.rs`, `agda.rs` | Commands, responses, the Agda process |
 | Positions and goals | `bridge/src/text.rs`, `goals.rs`, `location.rs` | Code points, UTF-16 and UTF-8 columns; goals that follow edits |
 | LSP | `bridge/src/server.rs`, `render.rs`, `output.rs` | Load, diagnostics, hover, code actions, give and refine, output file |
-| Task route | `bridge/src/socket.rs`, `languages/agda/tasks.json` | `agda-bridge client …` for Emacs-style keybindings |
+| Debug client | `bridge/src/socket.rs` | `agda-bridge client …` sends a command to a running bridge from a terminal |
 | Extension | `src/lib.rs`, `extension.toml`, `Cargo.toml` | Starts `agda-bridge` instead of the Agda Language Server |
 | Tests | `bridge/src/*.rs` (21 unit tests), `bridge/tests/lsp.rs` | The end-to-end test plays Zed's role against a real Agda |
 
@@ -32,9 +32,11 @@ release binary). Every row below is an assertion in that test.
 | Goals follow unsaved typing | proven | typing `suc` into a hole without saving, then refining, refines the right goal |
 | Refine creates new goals that work at once | proven | `suc ?` becomes `suc {!  !}`, the new goal is `?3`, and hover on it shows its context |
 | The output file is written, and Zed is asked to open it once without taking focus | proven (bridge side) | `.zed/agda-output.md` contains the goals; one `window/showDocument` with `takeFocus: false` |
-| Task, socket, bridge round trip works, with Zed's byte columns | proven | `agda-bridge client goal --row … --column …` finds `?2` behind `λ`, `𝔹` and `→`, and writes it to the output file |
-| Failures of a hidden task still reach the user | proven | a task outside a goal fails and the bridge sends `window/showMessage` |
+| The debug client reaches the running bridge, with UTF-8 byte columns | proven | `agda-bridge client goal --row … --column …` finds `?2` behind `λ`, `𝔹` and `→`, and writes it to the output file |
+| Failures of a client request also show in Zed | proven | a request outside a goal fails and the bridge sends `window/showMessage` |
 | Type errors become diagnostics on the right range | proven | `Bad.agda` gives an Error on line 7, columns 5 to 8, starting `error: [UnequalTerms]` |
+| Saving a file that is not Agda does not reach Agda | proven | a `didSave` for `TODO.md` produces no diagnostics; without the fix this assertion fails |
+| The output file can be reopened | proven | "Agda: open output file" is offered on a goal and on an error line (not on plain lines), and sends `window/showDocument` |
 | The extension builds for Zed | proven | `cargo build --release --target wasm32-wasip2` succeeds |
 
 The whole end-to-end test takes about 0.2 seconds, including starting Agda
@@ -68,11 +70,22 @@ hover.
 6. **The repository's `.gitignore` ignores `*.agda`**, which would have
    silently left the test files out of git. An exception for
    `bridge/tests/fixtures/` was added.
+7. **Zed sends `didSave` for every saved file to every language server of the
+   worktree**, whatever the file's language (`on_buffer_saved` in
+   `crates/project/src/lsp_store.rs`). Saving a Markdown file therefore made
+   the bridge ask Agda to load it. The bridge now only loads documents Zed
+   opened with it, and refuses paths without an Agda extension.
+8. **Zed opens a shown document in the active pane and makes it the visible
+   tab**, even with `takeFocus: false`, unless the user enabled
+   `reveal_if_open` (off by default; `open_path_preview` in
+   `crates/workspace/src/workspace.rs`). The bridge cannot tell whether the
+   output file is still open, so reopening it after every command would cover
+   the Agda file being edited. Hence it opens automatically once, and on
+   request afterwards.
 
 ## Checks only Zed can do
 
-These need Zed's user interface, so they could not be automated here. Each
-takes a minute.
+These need Zed's user interface, so they could not be automated here.
 
 ### Setup
 
@@ -93,24 +106,23 @@ takes a minute.
    }
    ```
 
-4. For the Emacs-style keys, add this to `keymap.json`:
+4. Optionally, bind keys to jump between goals (goals are the only
+   Information diagnostics, so these skip errors and warnings), in
+   `keymap.json`:
 
    ```json
    {
      "context": "Editor && extension == agda",
      "bindings": {
-       "ctrl-c ctrl-l": ["task::Spawn", { "task_name": "agda: load" }],
-       "ctrl-c ctrl-,": ["task::Spawn", { "task_name": "agda: goal type and context" }],
-       "ctrl-c ctrl-space": ["task::Spawn", { "task_name": "agda: give" }],
-       "ctrl-c ctrl-r": ["task::Spawn", { "task_name": "agda: refine" }],
        "ctrl-c ctrl-f": ["editor::GoToDiagnostic", { "severity": "information" }],
        "ctrl-c ctrl-b": ["editor::GoToPreviousDiagnostic", { "severity": "information" }]
      }
    }
    ```
 
-   On Linux and Windows `ctrl-c` is also copy, so Zed waits briefly after
-   `ctrl-c` for a second key before copying; on macOS there is no conflict.
+5. Optionally, set `"reveal_if_open": true` in Zed's `settings.json`. Then
+   "Agda: open output file" reveals the output file in the pane where it
+   already is, instead of opening it in the pane you are editing.
 
 ### Troubleshooting: `Library not loaded: @rpath/libLLVM.dylib` on macOS
 
@@ -129,27 +141,41 @@ is keg-only and links only `rustup` itself into Homebrew's `bin`. Then quit
 Zed completely and reopen it, because Zed reads the shell environment at
 startup.
 
-### Checklist
+### Results in Zed
 
-Open `bridge/tests/fixtures/Spike.agda` (a copy, so the fixture stays intact)
-and go through these:
+Run on macOS on 2 October 2026, with `bridge/tests/fixtures/Spike.agda`.
+Code actions were opened with `space a` (a vim mode binding).
 
-| # | Do this | Expected |
+| # | Check | Result |
 | --- | --- | --- |
-| 1 | Open the file | the LSP log lists "Agda Bridge"; the three holes get Information underlines |
-| 2 | Hover over `{!   !}` after `double n =` | a popup with `Goal: ℕ` and `n : ℕ`, highlighted as Agda |
-| 3 | Put the cursor in `{! suc (n + m) !}`, press `ctrl-.` (`cmd-.` on macOS, `g .` in vim mode) | "Agda: give ?0", "Agda: refine ?0" and "Agda: show goal ?0 in output" |
-| 4 | Choose "Agda: give ?0" | the hole becomes `suc (n + m)`, its underline disappears |
-| 5 | Look at where `.zed/agda-output.md` opened | **open question**: it opens in the active pane; drag it to a split, then save the Agda file and check that it updates |
-| 6 | Run "markdown: open preview to the side" on the output file | **open question**: does the preview update live, with Agda highlighting? |
-| 7 | Type `suc` into the hole after `double n =`, then `ctrl-c ctrl-r` | the hole becomes `suc {!  !}` without a terminal appearing |
-| 8 | Put the cursor in the hole after `not = λ (b : 𝔹) →`, press `ctrl-c ctrl-,` | the output file shows `b : 𝔹` (this checks the byte column conversion in real Zed) |
-| 9 | Press `ctrl-c ctrl-f` a few times | the cursor jumps between goals only, skipping errors |
-| 10 | Press `ctrl-c ctrl-space` outside a goal | a notification says "The cursor is not in a goal." |
-| 11 | Overall | does a task-based command feel fast enough? |
+| 1 | Opening the file: "Agda Bridge" in the LSP log, goals underlined | works |
+| 2 | Hover over a hole: goal and context, highlighted as Agda | works |
+| 3 | Code actions in `{! suc (n + m) !}`: give, refine, show goal in output | works |
+| 4 | "Agda: give ?0" replaces the hole | works |
+| 5 | The output file opens in the active pane, can be moved to a split, and updates there | works; but once closed it did not come back on the next save, see learned item 8 and the new "Agda: open output file" action |
+| 6 | Markdown preview of the output file updates live | not reported yet, still open |
+| 7 | Refine on the hole after `double n =` | works through the code action; the Emacs-style task did not work |
+| 8 | Goal ?2 after `λ`, `𝔹` and `→` in the output file | works through the code action |
+| 9 | Jumping between goals only, with `editor::GoToDiagnostic` | works (a native Zed binding, not an Agda task) |
+| 10, 11 | Task error notification, and the speed of tasks | not applicable: the tasks were removed |
 
-Rows 5, 6 and 11 are the open questions from the plan; the others confirm
-in real Zed what the test already proves against the protocol.
+One problem turned up: saving a Markdown file in the project made the bridge
+ask Agda to load it, which put an `InvalidExtensionError` in the output file
+and on the file's first character. That is fixed (learned item 7) and covered
+by the end-to-end test.
+
+### Decisions after phase 0
+
+- **The LSP path comes first.** The Emacs-style route through Zed tasks is
+  dropped: `languages/agda/tasks.json` is removed, and so is its keymap. The
+  `agda-bridge client` subcommand stays, as a debugging tool.
+- **Priorities for phase 1**, in addition to the plan: go to definition
+  (`cmd`-click on a name), and Unicode input in two styles, `\` followed by a
+  LaTeX name or one of the abbreviations of Agda's Emacs mode, and `#`
+  followed by a Typst symbol name as used in Typst's math mode (for example
+  `#arrow.r`). Typst publishes its symbol table as the Rust crate `codex`, so
+  the bridge can use the real names. Hover showing the type of any name is a
+  stretch goal.
 
 ## Deliberately left out of the spike
 
@@ -161,7 +187,7 @@ These belong to phase 1 or later, as the plan describes:
 - no semantic highlighting, go to definition, case split, auto, solve, abort,
   Unicode input or inlay hints yet;
 - errors in imported files are placed at the top of the current file;
-- the task route uses a Unix socket, so it does not work on Windows yet;
+- the debug client uses a Unix socket, so it does not work on Windows yet;
 - hover asks Agda every time (no cache) and answers "Agda is busy" during a
   load instead of waiting;
 - `agda-bridge` must be installed by hand; downloading it belongs to phase 4;
