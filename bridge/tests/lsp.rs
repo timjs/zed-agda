@@ -316,15 +316,16 @@ fn drives_agda_through_lsp_and_debug_client() {
         ""
     );
 
-    // Code actions on a filled hole offer give, refine and showing the goal;
-    // a line without a goal offers nothing.
+    // Code actions on a filled hole offer give, refine, showing the goal and
+    // the output file; a line without goals or problems offers nothing.
     let titles = client.code_actions(&spike_uri, position_of(&text, "suc (n", 0));
     assert_eq!(
         titles,
         [
             "Agda: give ?0",
             "Agda: refine ?0",
-            "Agda: show goal ?0 in output"
+            "Agda: show goal ?0 in output",
+            "Agda: open output file"
         ]
     );
     let titles = client.code_actions(&spike_uri, json!({ "line": 0, "character": 0 }));
@@ -454,18 +455,25 @@ fn drives_agda_through_lsp_and_debug_client() {
         "the Markdown file was sent to Agda"
     );
 
-    // Code actions are only about goals, so an error line offers none.
-    let titles = client.code_actions(&bad_uri, json!({ "line": 6, "character": 4 }));
-    assert!(titles.is_empty(), "{titles:?}");
-
     // Every command above rewrote the output file, but Zed was asked to open
-    // it only once, so a closed output file never covers the code.
+    // it only once, so a closed output file never covers the code by itself.
     let shown = client
         .history
         .iter()
         .filter(|m| m["method"] == "window/showDocument")
         .count();
     assert_eq!(shown, 1);
+
+    // On an error line, the output file can be reopened.
+    let titles = client.code_actions(&bad_uri, json!({ "line": 6, "character": 4 }));
+    assert_eq!(titles, ["Agda: open output file"]);
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": "agda.openOutput", "arguments": [] }),
+    );
+    let shown = client.wait_for("showDocument", |m| m["method"] == "window/showDocument");
+    assert_eq!(shown["params"]["uri"], uri(&output));
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

@@ -36,7 +36,7 @@ release binary). Every row below is an assertion in that test.
 | Failures of a client request also show in Zed | proven | a request outside a goal fails and the bridge sends `window/showMessage` |
 | Type errors become diagnostics on the right range | proven | `Bad.agda` gives an Error on line 7, columns 5 to 8, starting `error: [UnequalTerms]` |
 | Saving a file that is not Agda does not reach Agda | proven | a `didSave` for `TODO.md` produces no diagnostics; without the fix this assertion fails |
-| The output file is opened only once | proven | every command rewrites it, but the whole test sees exactly one `window/showDocument`; code actions appear only on goals |
+| The output file opens by itself once, and can be reopened | proven | every command rewrites it, but only the first sends `window/showDocument`; "Agda: open output file" is offered on a goal and on an error line (not on plain lines) and sends it again |
 | The extension builds for Zed | proven | `cargo build --release --target wasm32-wasip2` succeeds |
 
 The whole end-to-end test takes about 0.2 seconds, including starting Agda
@@ -80,12 +80,13 @@ hover.
    `reveal_if_open` (off by default; `open_path_preview` in
    `crates/workspace/src/workspace.rs`). The bridge cannot tell whether the
    output file is still open, so reopening it after every command would cover
-   the Agda file being edited. Hence it opens automatically only once; Zed's
-   own `pane: reopen closed item` brings it back after closing it.
+   the Agda file being edited. Hence it opens automatically only once;
+   afterwards the code action "Agda: open output file", or Zed's own
+   `pane: reopen closed item`, brings it back.
 9. **Neither extensions nor language servers can add commands to Zed's
    command palette.** Extensions have no API for it, and the command palette
    (`crates/command_palette`) does not list a language server's commands. So
-   "open output file" could not move from the code actions to the palette.
+   "open output file" stays a code action.
 
 ## Checks only Zed can do
 
@@ -125,9 +126,9 @@ These need Zed's user interface, so they could not be automated here.
    ```
 
 5. Optionally, set `"reveal_if_open": true` in Zed's `settings.json`. Then
-   the automatic opening reveals an output file that is already open in
-   another pane (for example after Zed restored your layout), instead of
-   opening a second copy in the pane you are editing.
+   "Agda: open output file" and the automatic opening reveal an output file
+   that is already open in another pane (for example after Zed restored your
+   layout), instead of opening a second copy in the pane you are editing.
 
 ### Troubleshooting: `Library not loaded: @rpath/libLLVM.dylib` on macOS
 
@@ -157,8 +158,8 @@ Code actions were opened with `space a` (a vim mode binding).
 | 2 | Hover over a hole: goal and context, highlighted as Agda | works |
 | 3 | Code actions in `{! suc (n + m) !}`: give, refine, show goal in output | works |
 | 4 | "Agda: give ?0" replaces the hole | works |
-| 5 | The output file opens in the active pane, can be moved to a split, and updates there | works; but once closed it did not come back on the next save, see learned item 8; reopen it with `pane: reopen closed item` |
-| 6 | Markdown preview of the output file updates live | not reported yet, still open |
+| 5 | The output file opens in the active pane, can be moved to a split, and updates there | works; but once closed it did not come back on the next save, see learned item 8; reopen it with "Agda: open output file" or `pane: reopen closed item` |
+| 6 | Markdown preview of the output file updates live | works, with Agda highlighting |
 | 7 | Refine on the hole after `double n =` | works through the code action; the Emacs-style task did not work |
 | 8 | Goal ?2 after `λ`, `𝔹` and `→` in the output file | works through the code action |
 | 9 | Jumping between goals only, with `editor::GoToDiagnostic` | works (a native Zed binding, not an Agda task) |
@@ -181,14 +182,15 @@ by the end-to-end test.
   `#arrow.r`). Typst publishes its symbol table as the Rust crate `codex`, so
   the bridge can use the real names. Hover showing the type of any name is a
   stretch goal.
-- **No code action for the output file.** A command palette entry was the
-  preferred replacement, but is not possible (learned item 9); Zed's own
-  `pane: reopen closed item` and the project panel cover it.
-- **A separate extension identity**: id `agda-interactive`, name "Agda
-  Interactive", version 0.3.0, by Tim Steenvoorden, crediting Haohan Yang's
-  `agda-zed` it is based on. Zed's publishing rules ask to propose
-  improvements to the existing extension before publishing a competing one,
-  so publishing starts with that conversation.
+- **"Agda: open output file" stays a code action**, offered on goals and on
+  lines with an Agda error or warning. A command palette entry was preferred,
+  but is not possible (learned item 9).
+- **The extension keeps its original identity** (id `agda`, name "Agda", by
+  Haohan Yang). Zed's publishing rules ask to propose improvements to the
+  existing extension instead of publishing a competing one, so this work is
+  meant as a contribution to `haohanyang/agda-zed`. The version is proposed
+  as 0.3.0, because the language server changes completely. A separate
+  identity (`agda-interactive`) was tried and reverted.
 
 ## Deliberately left out of the spike
 
@@ -204,6 +206,6 @@ These belong to phase 1 or later, as the plan describes:
 - hover asks Agda every time (no cache) and answers "Agda is busy" during a
   load instead of waiting;
 - `agda-bridge` must be installed by hand; downloading it belongs to phase 4;
-- publishing is not settled yet: the extension now has its own id, but Zed
-  expects a conversation with the existing extension's owner first (see the
-  decisions above and section 8 of the plan).
+- publishing goes through the existing extension: the work is to be proposed
+  to `haohanyang/agda-zed` (see the decisions above and section 8 of the
+  plan).
