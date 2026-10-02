@@ -1,10 +1,10 @@
-id = "agda"
-name = "Agda"
-version = "0.2.1"
+id = "agda-interactive"
+name = "Agda Interactive"
+version = "0.3.0"
 schema_version = 1
-authors = ["Haohan Yang yanghaohanmail@gmail.com"]
-description = "Agda support."
-repository = "https://github.com/haohanyang/agda-zed"
+authors = ["Tim Steenvoorden <tim.steenvoorden@gmail.com>"]
+description = "Interactive Agda through Agda's own interaction protocol: goals, hover, give and refine. Based on the Agda extension by Haohan Yang."
+repository = "https://github.com/timjs/zed-agda"
 
 [grammars.agda]
 repository = "https://github.com/tree-sitter/tree-sitter-agda"

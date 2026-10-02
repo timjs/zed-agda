@@ -3,7 +3,7 @@ name = "agda-bridge"
 version = "0.1.0"
 edition = "2024"
 description = "Language server that bridges Zed (LSP) and Agda's --interaction-json protocol"
-license = "MIT"
+license = "Apache-2.0"
 publish = false
 
 # The bridge is a native program and must not be part of the extension's

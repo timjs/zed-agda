@@ -41,19 +41,4 @@ impl Output {
         tokio::fs::rename(&temporary, &self.path).await?;
         Ok(!self.shown.swap(true, Ordering::SeqCst))
     }
-
-    /// Create the file if no command has written it yet, so that opening it
-    /// shows a file instead of an empty unsaved buffer. Counts as shown.
-    pub async fn ensure_exists(&self) -> io::Result<()> {
-        if !tokio::fs::try_exists(&self.path).await.unwrap_or(false) {
-            self.write(
-                "Agda",
-                None,
-                "No output yet. Save an Agda file to load it.\n",
-            )
-            .await?;
-        }
-        self.shown.store(true, Ordering::SeqCst);
-        Ok(())
-    }
 }
