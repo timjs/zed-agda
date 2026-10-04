@@ -89,8 +89,20 @@ seen yet (lines typed since the last save); `full` shows only Agda's.
 Opening or saving a file loads it in Agda. Goals then show their types as
 diagnostics, hover shows a goal's type and context, and a lone `?` becomes
 `{!  !}`. The code actions on a goal (`cmd-.` on macOS, `ctrl-.` on Linux)
-give, refine, case split, auto and solve it, or solve all goals. After a case
-split, save the file to load the new clauses.
+give, refine, case split, auto and solve it, or solve all goals. An empty goal
+offers a case split on each variable of its context, and on the result; with
+variables typed in the goal, it splits on those. After a case split, save the
+file to load the new clauses.
+
+## Renaming
+
+Rename a name with Zed's `editor: rename` (`F2`): every place where Agda found
+that name changes, in all Agda files open in Zed. Renaming one part of an
+operator renames the operator (`⊕` on the `+` of `n + m` makes `_+_` into
+`_⊕_`). It works on what Agda checked at the last save, so save first; text in
+goals, which Agda does not check, and files that are not open stay as they are.
+Afterwards a message lists the files that are not open but import the module
+and may use the name.
 
 ## Unicode input
 

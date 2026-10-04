@@ -14,6 +14,7 @@ mod links;
 mod location;
 mod output;
 mod protocol;
+mod rename;
 mod render;
 mod server;
 mod socket;

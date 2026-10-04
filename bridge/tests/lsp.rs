@@ -369,14 +369,14 @@ fn drives_agda_through_lsp_and_debug_client() {
     assert_eq!(
         titles,
         [
-            "Agda: give ?0",
-            "Agda: refine ?0",
-            "Agda: case split ?0 on suc (n + m)",
-            "Agda: auto ?0",
-            "Agda: solve ?0",
-            "Agda: solve all goals",
-            "Agda: show goal ?0 in output",
-            "Agda: open output file"
+            "Give",
+            "Refine",
+            "Case split on suc (n + m)",
+            "Auto",
+            "Solve",
+            "Solve all goals",
+            "Show goal in output",
+            "Open output file"
         ]
     );
     let titles = client.code_actions(&spike_uri, json!({ "line": 0, "character": 0 }));
@@ -525,7 +525,7 @@ fn drives_agda_through_lsp_and_debug_client() {
 
     // On an error line, the output file can be reopened.
     let titles = client.code_actions(&bad_uri, json!({ "line": 6, "character": 4 }));
-    assert_eq!(titles, ["Agda: open output file"]);
+    assert_eq!(titles, ["Open output file"]);
     client.received.clear();
     client.request(
         "workspace/executeCommand",
@@ -993,14 +993,14 @@ fn goal_commands() {
     assert_eq!(
         titles,
         [
-            "Agda: give ?0",
-            "Agda: refine ?0",
-            "Agda: case split ?0 on n",
-            "Agda: auto ?0",
-            "Agda: solve ?0",
-            "Agda: solve all goals",
-            "Agda: show goal ?0 in output",
-            "Agda: open output file"
+            "Give",
+            "Refine",
+            "Case split on n",
+            "Auto",
+            "Solve",
+            "Solve all goals",
+            "Show goal in output",
+            "Open output file"
         ]
     );
 
@@ -1096,6 +1096,141 @@ fn goal_commands() {
             .iter()
             .any(|m| m["method"] == "workspace/applyEdit")
     );
+
+    // An empty goal offers a case split on each variable of its context
+    // that can be split (`m : ℕ`, not the function `f`), and on the result.
+    let titles = client.code_actions(&goals_uri, json!({ "line": 10, "character": 14 }));
+    assert!(
+        titles.contains(&"Case split on m".to_string())
+            && titles.contains(&"Case split on result".to_string())
+            && !titles.iter().any(|t| t == "Give"),
+        "{titles:?}"
+    );
+    let edits = run(&mut client, "agda.caseSplit", json!([goals_uri, 0, "m"]));
+    assert_eq!(
+        edits[0]["newText"],
+        "zero + zero = {!  !}\nzero + suc m = {!  !}"
+    );
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn renames_across_open_files() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("rename", &["Nat.agda", "Uses.agda", "Spike.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    let init = client.initialize(&root, &agda);
+    assert_eq!(
+        init["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
+    let open = |client: &mut Client, name: &str| -> (String, String) {
+        let path = root.join(name);
+        let (uri, text) = (uri(&path), std::fs::read_to_string(&path).unwrap());
+        client.notify(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "agda", "version": 1, "text": text } }),
+        );
+        (uri, text)
+    };
+    let (nat_uri, nat_text) = open(&mut client, "Nat.agda");
+    client.diagnostics(&nat_uri, |d| d.is_empty());
+    let (uses_uri, uses_text) = open(&mut client, "Uses.agda");
+    client.diagnostics(&uses_uri, |d| d.is_empty());
+    let rename = |client: &mut Client, uri: &str, position: Value, name: &str| {
+        client.request(
+            "textDocument/rename",
+            json!({ "textDocument": { "uri": uri }, "position": position, "newName": name }),
+        )
+    };
+
+    // Renaming `suc` changes both open files, also when asked at the
+    // definition in `Nat.agda`: the uses in `Uses.agda` are found through
+    // that file's links.
+    let at = position_of(&uses_text, "suc", 0);
+    let prepared = client.request(
+        "textDocument/prepareRename",
+        json!({ "textDocument": { "uri": uses_uri }, "position": at }),
+    );
+    assert_eq!(prepared["end"]["character"], 9);
+    let edit = rename(
+        &mut client,
+        &nat_uri,
+        position_of(&nat_text, "suc", 0),
+        "succ",
+    );
+    let uses_edits = edit["changes"][&uses_uri].as_array().unwrap();
+    let nat_edits = edit["changes"][&nat_uri].as_array().unwrap();
+    assert_eq!(
+        apply_all(&uses_text, uses_edits),
+        uses_text.replace("suc", "succ")
+    );
+    assert_eq!(
+        apply_all(&nat_text, nat_edits),
+        nat_text.replace("suc", "succ")
+    );
+    let message = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
+    assert!(
+        message["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("in 3 place(s) in 2 open file(s)"),
+        "{message}"
+    );
+    // A keyword has nothing to rename, and a wrong name is refused.
+    let keyword = client.request(
+        "textDocument/prepareRename",
+        json!({ "textDocument": { "uri": uses_uri }, "position": position_of(&uses_text, "open", 0) }),
+    );
+    assert_eq!(keyword, Value::Null);
+    client.send(
+        json!({ "jsonrpc": "2.0", "id": 999, "method": "textDocument/rename",
+        "params": { "textDocument": { "uri": uses_uri }, "position": at, "newName": "a b" } }),
+    );
+    let refused = loop {
+        let message = client.receive();
+        if message["id"] == 999 {
+            break message;
+        }
+    };
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a name")
+    );
+
+    // An operator renamed from one of its parts: `⊕` on `+` makes `_⊕_`.
+    // Text in a goal is not checked by Agda, so it keeps `+`.
+    let (spike_uri, spike_text) = open(&mut client, "Spike.agda");
+    client.diagnostics(&spike_uri, |d| d.len() == 3);
+    let edit = rename(
+        &mut client,
+        &spike_uri,
+        position_of(&spike_text, "+ m = m", 0),
+        "⊕",
+    );
+    let renamed = apply_all(&spike_text, edit["changes"][&spike_uri].as_array().unwrap());
+    assert!(
+        renamed.contains("_⊕_ : ℕ → ℕ → ℕ\nzero  ⊕ m = m\nsuc n ⊕ m = {! suc (n + m) !}"),
+        "{renamed}"
+    );
+    // A bound variable only changes within its clause.
+    let edit = rename(
+        &mut client,
+        &spike_uri,
+        position_of(&spike_text, "b : 𝔹) →", 0),
+        "x",
+    );
+    let renamed = apply_all(&spike_text, edit["changes"][&spike_uri].as_array().unwrap());
+    assert!(renamed.contains("λ (x : 𝔹) →"), "{renamed}");
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

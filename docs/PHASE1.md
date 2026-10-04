@@ -366,6 +366,74 @@ All of it was checked against Agda 2.8.0's real answers.
   gates planned for phase 4.
 - Case split assumes the goal is on one line, as Emacs does.
 
+## Done: cleaner code actions, case split per variable, renaming
+
+### Code actions
+
+The titles lost their `Agda:` prefix and the goal number: `Give`, `Refine`,
+`Case split on n`, `Auto`, `Solve`, `Solve all goals`, `Show goal in output`,
+`Open output file`. The goal is the one under the cursor anyway.
+
+An empty goal now offers a case split on each variable of its context, and
+`Case split on result` (Agda's own name for a split without variables, from
+the prompt of `agda2-make-case` in `agda2-mode.el`). The variables come from
+`Cmd_goal_type_context`, which Agda answers with each variable's name, type
+and whether it is in scope. Variables whose type is a function type or a sort
+(`Set`, `Prop`) are left out, because Agda cannot split on them; whether any
+other type is a data type Agda only says when it splits. The context is asked
+once per goal, only when Agda is not busy, and kept until the next load; a
+hover on the goal fills it too. With variables typed in the goal, the one
+action splits on those, as before.
+
+### The comment after a case split
+
+Dropping it was not Agda's doing: Agda 2.8 sends the clauses with the code
+after the goal (`g zero m = ? + m` for `g n m = {! n !} + m`) but without the
+comment, and Emacs's `agda2-make-case-action`, which the bridge ported,
+replaces the whole line. The bridge now puts a line comment after the goal,
+with the space before it, at the end of the first new clause.
+
+### Renaming
+
+Agda's interaction protocol has no rename command, so the bridge builds one on
+the definition sites it already keeps for go to definition
+(`bridge/src/rename.rs`):
+
+1. **What changes.** Every place in the open Agda files whose link leads to
+   the same definition site, and the definition itself. Agda's highlighting
+   gives a link for every use, a bound variable included, a qualified name as
+   a whole (`N.suc`, which becomes `N.succ`) and each part of an operator
+   (`+` in `n + m`, linked to `_+_`).
+2. **Operators.** A new name must have the holes of the old one (`_+_` to
+   `_⊕_`, not to `plus`); a name without underscores, typed on one part of an
+   operator, renames that part (`⊕` on `+` gives `_⊕_`). A name with spaces or
+   one of `(){}";.@` is refused.
+3. **Safety checks.** The defining file must be open in Zed and saved since
+   its last check, and every other file whose links point into it must have
+   been checked after it, or the offsets would be stale; otherwise the rename
+   is refused with what to save. Files that are not open are not changed:
+   afterwards a message lists those that import the defining module and
+   mention the name (not for a bound variable, which is local anyway).
+4. **Not renamed:** text in goals, which Agda does not check (the `+` in
+   `{! suc (n + m) !}`), and names typed since the last save.
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| A comment after the goal stays on the first clause; code after the goal comes from Agda's clauses; `x--y` is no comment | passes; fails without keeping the comment |
+| End to end: the new titles; an empty goal offers `Case split on m` and `Case split on result`, but not `Give`; the split on `m` gives `zero + zero` and `zero + suc m` | passes |
+| New names: full, on one part of an operator, `if_then_else_`; wrong holes, spaces and reserved characters refused | passes |
+| Places: full, qualified (`N.suc`) and operator parts (`N.+`) | passes |
+| End to end: renaming `suc` at its definition in `Nat.agda` also changes `Uses.agda` (3 places in 2 files); a keyword cannot be renamed; `a b` is refused; `⊕` on `+` renames `_+_` but not inside a goal; a bound variable `b` | passes; fails when only the file of the request is searched |
+
+### To check in Zed
+
+1. Reinstall the bridge and restart the language server.
+2. On an empty goal, open the code actions: a case split per variable.
+3. Case split a goal with `-- a comment` after it.
+4. Press `F2` on a name used in two open files, and on the `+` of an operator.
+
 ## Next steps
 
 1. **A hover cache**, so hover stays fast during long loads.

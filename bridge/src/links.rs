@@ -25,6 +25,8 @@ pub struct Link {
     pub start: usize,
     pub end: usize,
     pub target: Target,
+    /// Whether the name is a bound variable, local to its definition.
+    pub local: bool,
 }
 
 /// Links from the highlighting Agda sent while loading `file`. Entries
@@ -51,6 +53,7 @@ pub fn from_highlighting(entries: &[HighlightingEntry], file: &Path) -> Vec<Link
                 }
             };
             Some(Link {
+                local: entry.atoms.iter().any(|atom| atom == "bound"),
                 start: from.saturating_sub(1),
                 end: to.saturating_sub(1),
                 target,
@@ -122,6 +125,7 @@ mod tests {
             links,
             [
                 Link {
+                    local: false,
                     start: 42,
                     end: 43,
                     target: Target::File {
@@ -130,6 +134,7 @@ mod tests {
                     }
                 },
                 Link {
+                    local: false,
                     start: 44,
                     end: 47,
                     target: Target::Here(36)
@@ -142,6 +147,7 @@ mod tests {
     fn follows_edits() {
         let old = "two : N\ntwo = suc zero";
         let link = |start, end, target| Link {
+            local: false,
             start,
             end,
             target: Target::Here(target),
@@ -163,6 +169,7 @@ mod tests {
     #[test]
     fn moves_targets_in_this_document() {
         let mut links = vec![Link {
+            local: false,
             start: 20,
             end: 23,
             target: Target::Here(10),
@@ -180,6 +187,7 @@ mod tests {
     #[test]
     fn finds_the_link_under_or_right_after_the_cursor() {
         let links = [Link {
+            local: false,
             start: 4,
             end: 7,
             target: Target::Here(0),

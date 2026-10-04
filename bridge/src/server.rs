@@ -24,7 +24,7 @@ use crate::protocol::{
     Response, Solution, message_text,
 };
 use crate::text::{self, Change};
-use crate::{input, iotcm, location, render};
+use crate::{input, iotcm, location, rename, render};
 
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
@@ -87,6 +87,11 @@ struct Document {
     problems: Vec<Diagnostic>,
     /// The text Agda last loaded, to skip reloading identical text.
     loaded_text: Option<String>,
+    /// The variables a goal's context offers for a case split, once known.
+    split_variables: HashMap<u32, Vec<String>>,
+    /// When Agda last checked this text, to tell whether links into another
+    /// file are older than that file's last check.
+    loaded_at: Option<std::time::Instant>,
 }
 
 impl Document {
@@ -278,6 +283,29 @@ impl Outcome {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// The variables of a goal's context that a case split may work on: those in
+/// scope, whose type is not a function type or a sort (Agda cannot split on
+/// those). Whether a type is a data type Agda only says when it splits.
+fn split_variables(info: &GoalInfo) -> Vec<String> {
+    let GoalInfo::GoalType { entries, .. } = info else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|entry| {
+            let ty = entry.binding.trim();
+            entry.in_scope
+                && entry.reified_name != "_"
+                && !ty.contains('→')
+                && !ty.contains("->")
+                && !["Set", "Prop", "Type"]
+                    .iter()
+                    .any(|sort| ty.starts_with(sort))
+        })
+        .map(|entry| entry.reified_name.clone())
+        .collect()
 }
 
 fn uri_of(path: &Path) -> Option<Uri> {
@@ -492,6 +520,8 @@ impl Bridge {
             document.goal_types = outcome.goal_types.clone();
             document.problems = problems;
             document.loaded_text = Some(snapshot);
+            document.loaded_at = Some(std::time::Instant::now());
+            document.split_variables.clear();
             if opened {
                 document.expand_question_marks()
             } else {
@@ -532,9 +562,35 @@ impl Bridge {
         );
         drop(guard);
         match outcome.goal_info {
-            Some((id, info)) => Ok(render::goal(id, &info)),
+            Some((id, info)) => {
+                if let Some(document) = self.documents.lock().unwrap().get_mut(path) {
+                    document.split_variables.insert(id, split_variables(&info));
+                }
+                Ok(render::goal(id, &info))
+            }
             None => Err(outcome.errors.join("\n")),
         }
+    }
+
+    /// The variables of goal `id` to offer for a case split: from the cache,
+    /// or asked from Agda when it is not busy.
+    async fn goal_split_variables(&self, path: &Path, id: u32) -> Vec<String> {
+        let cached = self
+            .documents
+            .lock()
+            .unwrap()
+            .get(path)
+            .and_then(|document| document.split_variables.get(&id).cloned());
+        if let Some(variables) = cached {
+            return variables;
+        }
+        let _ = self.goal_info(path, id, false).await;
+        self.documents
+            .lock()
+            .unwrap()
+            .get(path)
+            .and_then(|document| document.split_variables.get(&id).cloned())
+            .unwrap_or_default()
     }
 
     /// The text typed in a goal, trimmed.
@@ -662,8 +718,16 @@ impl Bridge {
     /// the missing patterns or split on the result. Agda's new clauses
     /// replace the goal's clause; their goals get numbers when the file is
     /// saved and loaded again (Emacs saves and reloads by itself).
-    pub async fn case_split(&self, path: &Path, id: u32) -> Result<String, String> {
-        let variables = self.goal_content(path, id)?;
+    pub async fn case_split(
+        &self,
+        path: &Path,
+        id: u32,
+        variable: Option<String>,
+    ) -> Result<String, String> {
+        let variables = match variable {
+            Some(variable) => variable,
+            None => self.goal_content(path, id)?,
+        };
         let mut guard = self.lock_session().await?;
         Self::check_current(&guard, path)?;
         let outcome = Outcome::collect(
@@ -858,6 +922,159 @@ impl Bridge {
         )
     }
 
+    /// Where the name of `link` in the document at `path` is defined: a file
+    /// as seen from the worktree, and a 0-based char offset in it.
+    fn definition_site(&self, path: &Path, link: &Link) -> (PathBuf, usize) {
+        match &link.target {
+            Target::Here(offset) => (path.to_path_buf(), *offset),
+            Target::File { path, position } => (self.in_worktree(path), position.saturating_sub(1)),
+        }
+    }
+
+    /// The edits that rename the name at `position` in `path` to `new`, in
+    /// every open document, and a summary for the user.
+    fn rename_edits(
+        &self,
+        path: &Path,
+        position: Position,
+        new: &str,
+    ) -> Result<(HashMap<Uri, Vec<TextEdit>>, String), String> {
+        let documents = self.documents.lock().unwrap();
+        let document = documents.get(path).ok_or("This file is not open.")?;
+        let offset = text::offset_of(&document.text, position);
+        let link = links::link_at(&document.links, offset)
+            .ok_or("Agda knows no name here. Save the file to check new names first.")?;
+        let chars = |text: &str, start: usize, end: usize| -> String {
+            text.chars().skip(start).take(end - start).collect()
+        };
+        let occurrence = chars(&document.text, link.start, link.end);
+        let (site_path, site) = self.definition_site(path, link);
+        let same = |a: &Path, b: &Path| a == b || a.canonicalize().ok() == b.canonicalize().ok();
+        let (defining_path, defining) = documents
+            .iter()
+            .find(|(path, _)| same(path, &site_path))
+            .ok_or(format!(
+                "`{occurrence}` is defined in {}, which is not open in Zed. Open it to rename the name.",
+                site_path.display()
+            ))?;
+        if defining.loaded_text.as_ref() != Some(&defining.text) {
+            return Err(format!(
+                "Save {} first, so that Agda has checked it as it is.",
+                defining_path.display()
+            ));
+        }
+        let old = match defining.links.iter().find(|link| link.start == site) {
+            Some(link) => chars(&defining.text, link.start, link.end),
+            None => defining
+                .text
+                .chars()
+                .skip(site)
+                .take_while(|c| !c.is_whitespace() && !"(){}\";.@".contains(*c))
+                .collect(),
+        };
+        let old = rename::unqualified(&old).to_string();
+        let new = rename::new_name(&old, new, &occurrence)?;
+
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        let mut places = 0;
+        let mut site_renamed = false;
+        for (doc_path, doc) in documents.iter() {
+            let mut edits = Vec::new();
+            for link in &doc.links {
+                let (target_path, target) = self.definition_site(doc_path, link);
+                if target != site || !same(&target_path, defining_path) {
+                    continue;
+                }
+                // Links into another file are as old as this file's check.
+                if !same(doc_path, defining_path) && doc.loaded_at < defining.loaded_at {
+                    return Err(format!(
+                        "Save {} first, so that Agda checks it against the current {}.",
+                        doc_path.display(),
+                        defining_path.display()
+                    ));
+                }
+                let text = chars(&doc.text, link.start, link.end);
+                if let Some(replacement) = rename::replacement(&old, &new, &text) {
+                    site_renamed |= same(doc_path, defining_path) && link.start == site;
+                    edits.push(TextEdit::new(
+                        range_of(&doc.text, link.start, link.end),
+                        replacement,
+                    ));
+                }
+            }
+            if same(doc_path, defining_path) && !site_renamed {
+                let end = site + old.chars().count();
+                edits.push(TextEdit::new(range_of(&doc.text, site, end), new.clone()));
+                site_renamed = true;
+            }
+            if !edits.is_empty() {
+                places += edits.len();
+                let uri = uri_of(doc_path).ok_or("Invalid file path.")?;
+                changes.insert(uri, edits);
+            }
+        }
+
+        let mut summary = format!(
+            "Renamed `{old}` to `{new}` in {places} place(s) in {} open file(s).",
+            changes.len()
+        );
+        if !link.local {
+            let others = self.files_that_may_use(&documents, defining_path, &old);
+            if !others.is_empty() {
+                summary.push_str(&format!(
+                    " Files that are not open are not changed; these may use it: {}.",
+                    others.join(", ")
+                ));
+            }
+        }
+        Ok((changes, summary))
+    }
+
+    /// The Agda files of the worktree that are not open, but import the
+    /// module of `defining` and mention a part of `name`: those a rename in
+    /// the open files may miss.
+    fn files_that_may_use(
+        &self,
+        documents: &HashMap<PathBuf, Document>,
+        defining: &Path,
+        name: &str,
+    ) -> Vec<String> {
+        let (Some(root), Some(module)) = (self.root(), defining.file_stem()) else {
+            return Vec::new();
+        };
+        let module = module.to_string_lossy();
+        let parts: Vec<&str> = name.split('_').filter(|part| !part.is_empty()).collect();
+        let mut found = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if file_name.starts_with('.') || file_name == "_build" {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                } else if is_agda_source(&path)
+                    && !documents.contains_key(&path)
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                    && text
+                        .lines()
+                        .any(|line| line.contains("import") && line.contains(&*module))
+                    && parts.iter().any(|part| text.contains(part))
+                {
+                    let shown = path.strip_prefix(root).unwrap_or(&path);
+                    found.push(shown.display().to_string());
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
     /// The answer to go to definition: a link from the name at `origin` to
     /// `at` in `uri`, or only the target for clients without link support.
     fn definition(&self, origin: Range, uri: Uri, at: Position) -> GotoDefinitionResponse {
@@ -952,6 +1169,10 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -1143,6 +1364,47 @@ impl LanguageServer for Backend {
         }))
     }
 
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> RpcResult<Option<PrepareRenameResponse>> {
+        let Some(path) = path_of(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let documents = self.0.documents.lock().unwrap();
+        let Some(document) = documents.get(&path) else {
+            return Ok(None);
+        };
+        let offset = text::offset_of(&document.text, params.position);
+        Ok(links::link_at(&document.links, offset).map(|link| {
+            PrepareRenameResponse::Range(range_of(&document.text, link.start, link.end))
+        }))
+    }
+
+    async fn rename(&self, params: RenameParams) -> RpcResult<Option<WorkspaceEdit>> {
+        let request = params.text_document_position;
+        let Some(path) = path_of(&request.text_document.uri) else {
+            return Ok(None);
+        };
+        match self
+            .0
+            .rename_edits(&path, request.position, &params.new_name)
+        {
+            Ok((changes, summary)) => {
+                self.0.client.show_message(MessageType::INFO, summary).await;
+                Ok(Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..WorkspaceEdit::default()
+                }))
+            }
+            Err(message) => Err(tower_lsp_server::jsonrpc::Error {
+                code: tower_lsp_server::jsonrpc::ErrorCode::InvalidParams,
+                message: message.into(),
+                data: None,
+            }),
+        }
+    }
+
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
@@ -1240,42 +1502,49 @@ impl LanguageServer for Backend {
         let mut actions = Vec::new();
         if let Some((id, content)) = &goal {
             let id = *id;
-            let goal_action = |title: String, command: &str| {
+            let rewrite = Some(CodeActionKind::REFACTOR_REWRITE);
+            let goal_action = |title: &str, command: &str| {
                 let arguments = vec![json!(uri.as_str()), json!(id)];
-                action(
-                    title,
-                    command,
-                    arguments,
-                    Some(CodeActionKind::REFACTOR_REWRITE),
-                )
+                action(title.to_string(), command, arguments, rewrite.clone())
             };
             if !content.is_empty() {
-                actions.push(goal_action(format!("Agda: give ?{id}"), COMMAND_GIVE));
+                actions.push(goal_action("Give", COMMAND_GIVE));
             }
-            actions.push(goal_action(format!("Agda: refine ?{id}"), COMMAND_REFINE));
-            let split = match content.is_empty() {
-                true => format!("Agda: case split ?{id}"),
-                false => format!("Agda: case split ?{id} on {content}"),
-            };
-            actions.push(goal_action(split, COMMAND_CASE_SPLIT));
-            actions.push(goal_action(format!("Agda: auto ?{id}"), COMMAND_AUTO));
-            actions.push(goal_action(format!("Agda: solve ?{id}"), COMMAND_SOLVE));
+            actions.push(goal_action("Refine", COMMAND_REFINE));
+            // With variables typed in the goal, split on those; otherwise
+            // offer each variable of the goal's context, and the split on
+            // the result (Agda's name for a split without variables).
+            if content.is_empty() {
+                for variable in self.0.goal_split_variables(&path, id).await {
+                    actions.push(action(
+                        format!("Case split on {variable}"),
+                        COMMAND_CASE_SPLIT,
+                        vec![json!(uri.as_str()), json!(id), json!(variable)],
+                        rewrite.clone(),
+                    ));
+                }
+                actions.push(goal_action("Case split on result", COMMAND_CASE_SPLIT));
+            } else {
+                actions.push(goal_action(
+                    &format!("Case split on {content}"),
+                    COMMAND_CASE_SPLIT,
+                ));
+            }
+            actions.push(goal_action("Auto", COMMAND_AUTO));
+            actions.push(goal_action("Solve", COMMAND_SOLVE));
             actions.push(action(
-                "Agda: solve all goals".into(),
+                "Solve all goals".into(),
                 COMMAND_SOLVE_ALL,
                 vec![json!(uri.as_str())],
-                Some(CodeActionKind::REFACTOR_REWRITE),
+                rewrite.clone(),
             ));
-            actions.push(goal_action(
-                format!("Agda: show goal ?{id} in output"),
-                COMMAND_GOAL,
-            ));
+            actions.push(goal_action("Show goal in output", COMMAND_GOAL));
         }
         // Offered where output matters, not on every line, so Zed does not
         // show a code action indicator everywhere.
         if goal.is_some() || on_problem {
             actions.push(action(
-                "Agda: open output file".into(),
+                "Open output file".into(),
                 COMMAND_OPEN_OUTPUT,
                 Vec::new(),
                 None,
@@ -1316,7 +1585,14 @@ impl LanguageServer for Backend {
                 (COMMAND_GIVE, Some(id)) => bridge.give(&path, id, GoalCommand::Give).await,
                 (COMMAND_REFINE, Some(id)) => bridge.give(&path, id, GoalCommand::Refine).await,
                 (COMMAND_AUTO, Some(id)) => bridge.give(&path, id, GoalCommand::Auto).await,
-                (COMMAND_CASE_SPLIT, Some(id)) => bridge.case_split(&path, id).await,
+                (COMMAND_CASE_SPLIT, Some(id)) => {
+                    let variable = params
+                        .arguments
+                        .get(2)
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    bridge.case_split(&path, id, variable).await
+                }
                 (COMMAND_SOLVE, Some(id)) => bridge.solve(&path, Some(id)).await,
                 (COMMAND_GOAL, Some(id)) => match bridge.goal_info(&path, id, true).await {
                     Ok(markdown) => {

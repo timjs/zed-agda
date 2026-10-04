@@ -123,7 +123,7 @@ async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
         "give" => bridge.give(&request.file, id, GoalCommand::Give).await,
         "refine" => bridge.give(&request.file, id, GoalCommand::Refine).await,
         "auto" => bridge.give(&request.file, id, GoalCommand::Auto).await,
-        "case-split" => bridge.case_split(&request.file, id).await,
+        "case-split" => bridge.case_split(&request.file, id, None).await,
         "solve" => bridge.solve(&request.file, Some(id)).await,
         "goal" => {
             let markdown = bridge.goal_info(&request.file, id, true).await?;

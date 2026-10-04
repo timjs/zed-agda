@@ -142,6 +142,14 @@ pub fn case_split(
             if line_end > code_start && chars[line_end - 1] == '\r' {
                 line_end -= 1;
             }
+            // Agda's clauses repeat the code after the goal (`? + m`) but
+            // not a comment; keep a line comment after the goal, with the
+            // space before it, at the end of the first clause.
+            let rest: String = chars[goal.end..line_end].iter().collect();
+            let mut clauses = clauses;
+            if let (Some(first), Some(comment)) = (clauses.first_mut(), line_comment(&rest)) {
+                first.push_str(comment);
+            }
             (code_start, line_end, clauses.join(&next_line))
         }
         // Only the clause of the goal, up to the goal's end: in `λ { … }` it
@@ -166,6 +174,22 @@ pub fn case_split(
             }
         }
     }
+}
+
+/// The line comment at the end of `rest`, with the whitespace before it: a
+/// `--` at the start or after whitespace (elsewhere it is part of a name).
+fn line_comment(rest: &str) -> Option<&str> {
+    let dashes = rest.char_indices().find_map(|(i, c)| {
+        let starts = c == '-'
+            && rest[i..].starts_with("--")
+            && rest[..i]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace);
+        starts.then_some(i)
+    })?;
+    let space = rest[..dashes].len() - rest[..dashes].trim_end().len();
+    Some(&rest[dashes - space..])
 }
 
 /// Char offsets (relative to `text`) where [`GOAL_MARKER`]s start.
@@ -293,15 +317,26 @@ mod tests {
             ),
             "_+_ : ℕ → ℕ → ℕ\nzero + m = {!  !}\nsuc n + m = {!  !}\nx = y\n"
         );
-        // In a `where` block every clause keeps the indentation, and the
-        // rest of the line goes, as in Emacs.
+        // In a `where` block every clause keeps the indentation, and a
+        // comment after the goal stays on the first clause (Emacs drops it).
         assert_eq!(
             split(
-                "  where\n    n + m = {! n !} -- todo\n",
+                "  where\n    n + m = {! n !}  -- todo\n",
                 MakeCaseVariant::Function,
                 &clauses
             ),
-            "  where\n    zero + m = {!  !}\n    suc n + m = {!  !}\n"
+            "  where\n    zero + m = {!  !}  -- todo\n    suc n + m = {!  !}\n"
+        );
+        // Code after the goal is in Agda's clauses already, as Agda 2.8
+        // sends them for `g n m = {! n !} + m`; `--` inside a name is no
+        // comment.
+        assert_eq!(
+            split(
+                "g n m = {! n !} + m x--y\n",
+                MakeCaseVariant::Function,
+                &["g zero m = ? + m x--y", "g (suc n) m = ? + m x--y"]
+            ),
+            "g zero m = {!  !} + m x--y\ng (suc n) m = {!  !} + m x--y\n"
         );
         // A Windows line end stays.
         assert_eq!(
