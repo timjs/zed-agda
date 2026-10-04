@@ -83,6 +83,12 @@ impl Client {
 
     /// Initialize the server, announcing the client `capabilities`.
     fn initialize_with(&mut self, root: &Path, agda: &str, capabilities: Value) -> Value {
+        self.initialize_full(root, capabilities, json!({ "agdaPath": agda }))
+    }
+
+    /// Initialize the server with client `capabilities` and the bridge's
+    /// `options`, as Zed passes `lsp.agda-bridge.initialization_options`.
+    fn initialize_full(&mut self, root: &Path, capabilities: Value, options: Value) -> Value {
         let init = self.request(
             "initialize",
             json!({
@@ -90,7 +96,7 @@ impl Client {
                 "rootUri": uri(root),
                 "workspaceFolders": [{ "uri": uri(root), "name": "test" }],
                 "capabilities": capabilities,
-                "initializationOptions": { "agdaPath": agda },
+                "initializationOptions": options,
             }),
         );
         self.notify("initialized", json!({}));
@@ -774,7 +780,7 @@ fn completes_unicode_input() {
     }
 
     let input_uri = uri(&root.join("Input.agda"));
-    let mut text = "id : A \\to\nf : 𝔹 \\bN\n{-#\nx = #arrow.r\n".to_string();
+    let mut text = "id : A \\to\nf : 𝔹 \\bN\n{-#\nx = #arrow.r #->\n".to_string();
     client.notify(
         "textDocument/didOpen",
         json!({ "textDocument": { "uri": input_uri, "languageId": "agda", "version": 1, "text": text } }),
@@ -806,12 +812,15 @@ fn completes_unicode_input() {
         json!({ "line": 1, "character": 7 })
     );
 
-    // `#` after a space starts a Typst name, but `#` in a pragma does not.
+    // `#` starts a Typst name or shorthand; by default also in a pragma.
     let result = complete(&mut client, 3, 12);
     assert_eq!(result["items"][0]["label"], "→");
     assert_eq!(result["items"][0]["detail"], "#arrow.r");
-    assert_eq!(complete(&mut client, 2, 3), Value::Null);
-    // Neither does ordinary text.
+    let result = complete(&mut client, 3, 16);
+    assert_eq!(result["items"][0]["label"], "→");
+    assert_eq!(result["items"][0]["detail"], "#->");
+    assert_ne!(complete(&mut client, 2, 3), Value::Null);
+    // Ordinary text does not.
     assert_eq!(complete(&mut client, 0, 2), Value::Null);
 
     // After the edit, as Zed sends it, `→` is not completed again; a lone
@@ -826,7 +835,57 @@ fn completes_unicode_input() {
     let result = complete(&mut client, 4, 5);
     assert_eq!(result["isIncomplete"], true);
     assert!(result["items"].as_array().unwrap().len() <= 200);
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
 
+    // The options: leaders only after whitespace, and a space after the
+    // symbol.
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize_full(
+        &root,
+        json!({}),
+        json!({ "agdaPath": "agda-bridge-test-no-agda",
+                "symbolOnlyAfterWhitespace": true, "symbolTrailingSpace": true }),
+    );
+    let text = "id : A \\to\n{-#\n".to_string();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": input_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    let result = complete(&mut client, 0, 10);
+    assert_eq!(result["items"][0]["textEdit"]["newText"], "→ ");
+    assert_eq!(complete(&mut client, 1, 3), Value::Null);
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+
+    // Without symbol input there are no completions at all, and a wrong
+    // value is reported.
+    let mut client = Client::start(&root.join("bridge.sock"));
+    let init = client.initialize_full(
+        &root,
+        json!({}),
+        json!({ "agdaPath": "agda-bridge-test-no-agda", "symbolInput": "none" }),
+    );
+    assert!(init["capabilities"]["completionProvider"].is_null());
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize_full(
+        &root,
+        json!({}),
+        json!({ "agdaPath": "agda-bridge-test-no-agda", "symbolInput": "tex" }),
+    );
+    let message = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
+    assert!(
+        message["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("symbolInput"),
+        "{message}"
+    );
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);
     let _ = client.child.wait();

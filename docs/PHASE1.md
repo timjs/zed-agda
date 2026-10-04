@@ -150,10 +150,12 @@ offers the symbols as completions (`bridge/src/input.rs`).
    which modifiers may come in any order (`#arrow.long.r` is `#arrow.r.long`).
 2. **The bridge finds the leader itself.** Looking back from the cursor, `\`
    starts an abbreviation unless whitespace follows it, so a lambda such as
-   `\x → x` is left alone once the space is typed. `#` starts a Typst name
-   only at the start of a line or after whitespace, because Agda uses `#`
-   itself, in pragmas such as `{-# OPTIONS --safe #-}` and in names. The
-   completion replaces the leader and everything typed after it.
+   `\x → x` is left alone once the space is typed. `#` at first started a
+   Typst name only at the start of a line or after whitespace, because Agda
+   uses `#` itself, in pragmas such as `{-# OPTIONS --safe #-}` and in names;
+   that rule is now the option `symbolOnlyAfterWhitespace`, for both leaders
+   alike (see "Symbol options" below). The completion replaces the leader and
+   everything typed after it.
 3. **Zed must ask again after every character.** Zed only asks for
    completions after a word character or a trigger character, and closes the
    menu after any other character. Abbreviations contain punctuation (`\->`,
@@ -184,9 +186,9 @@ offers the symbols as completions (`bridge/src/input.rs`).
 | `\to`, `\->`, `\==`, `\bN`, `\Gl` and `\_1` offer `→`, `→`, `≡`, `ℕ`, `λ` and `₁` first; `\l` keeps the order of Agda's Emacs mode | passes |
 | `#arrow.r`, `#NN` and the partly typed `#alph` offer `→`, `ℕ` and `α` first; modifiers in any order (`#arrow.long.r` offers `⟶`), a partly typed modifier (`#arrow.r.doub` offers `⇒`) and a nested module (`#gender.fem`) work | passes |
 | Columns are UTF-16 units: after `𝔹` the leader is found at the right column, and a column inside `𝔹` or beyond the line gets no answer | passes; fails when columns count characters |
-| `#` in `{-#` and in `x#y` is left alone | passes; fails without the whitespace check |
+| `#` in `{-#` and in `x#y` is left alone (now only with `symbolOnlyAfterWhitespace`, see below) | passes; fails without the whitespace check |
 | Every character of every abbreviation is a word character or a trigger character | passes |
-| End to end, without Agda: the edit turns `\to` into `→`, `\bN` after `𝔹` starts at UTF-16 column 7, `#arrow.r` is completed, a pragma and ordinary text get nothing, and a lone `\` gets an incomplete list | passes |
+| End to end, without Agda: the edit turns `\to` into `→`, `\bN` after `𝔹` starts at UTF-16 column 7, `#arrow.r` is completed, a pragma (now only with `symbolOnlyAfterWhitespace`) and ordinary text get nothing, and a lone `\` gets an incomplete list | passes |
 
 ### To check in Zed
 
@@ -207,6 +209,81 @@ offers the symbols as completions (`bridge/src/input.rs`).
 - The menu also appears in comments and strings.
 - Literate Agda (`.lagda.md`) opens as Markdown in Zed, so it gets no
   completions.
+
+## Done: symbol options, Typst shorthands and accents
+
+### Options
+
+Three initialization options, read when the bridge starts
+(`input::Options`):
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `symbolInput` | `"both"` | `"latex"`, `"typst"`, `"both"` or `"none"`; with `"none"` the bridge does not offer completions at all |
+| `symbolTrailingSpace` | `false` | a space after the symbol, unless the next character is already whitespace |
+| `symbolOnlyAfterWhitespace` | `false` | `\` and `#` count only at the start of a line or after whitespace |
+
+A value of the wrong kind keeps the default and is reported with a warning.
+Before, `#` always needed whitespace before it and `\` never did; now both
+follow the same option, and by default both count anywhere. An abbreviation
+is still tried first, so `\#` stays Agda's `♯`.
+
+Switching Agda's highlighting on or off is not an option of the bridge: it
+is Zed's own `semantic_tokens` setting per language. Its default is `"off"`
+for every language (`assets/settings/default.json` in Zed), and an extension
+can only add rules for tokens (`semantic_token_rules.json`), not defaults for
+settings (`crates/extension_host/src/extension_host.rs`). A second switch in
+the bridge would only duplicate Zed's.
+
+### Typst shorthands and accents
+
+After `#`, besides symbol names:
+
+1. **Math shorthands**, such as `#->` for `→` and `#[|` for `⟦`: the 38 of
+   Typst's math mode, taken from the `data-math-shorthand` attributes of
+   Typst's documentation of symbols. `codex` does not contain them.
+2. **Accents**, written as Typst writes them in math: `#acute(e)` for `é`,
+   with or without the closing parenthesis, around a letter, a symbol name
+   (`#hat(alpha)`) or another accent (`#macron(diaer(u))` for `ǖ`). The 20
+   accent names come from Typst's documentation of `accent`; the bridge
+   puts the matching combining character after the base and composes the
+   result (Unicode normalisation NFC, with the `unicode-normalization`
+   crate), so `é` is one character where Unicode has one, and `α̂` stays two.
+
+Typst's `sym` module itself has no accented letters, so before this `#`
+could not type `é` at all; `\'e` could, and still can. Of the 200 symbols
+that only the left-out TeX sequences produced, accents bring back 70, the
+letters with two accents above, such as `Ǖ` (`#macron(diaer(U))`); Typst has
+no accents below the letter (a cedilla, a dot below), and modifier letters
+such as `ʱ` are not accents, so the other 130 still cannot be typed.
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| Shorthands: `#->` offers `→` first, then `↠`; `#=>`, `#[\|`, `#!=`, `#-` (the minus sign) and `#...` | passes |
+| Accents: `#acute(e)` is `é`, `#diaer(o` is `ö`, `#macron(diaer(U))` is `Ǖ`, `#hat(alpha)` and `#arrow(x)` keep their combining character; an unknown accent or base gives nothing | passes; fails without NFC |
+| Options: by default both leaders count anywhere, also in `{-#`; with `symbolOnlyAfterWhitespace` neither does after a letter; each mode offers only its leader; `\#` stays `♯`; a Typst name after a `#` in a failed abbreviation | passes; fails when the option is ignored |
+| A space follows the symbol only when asked and not already there | passes |
+| The options are read, and wrong values reported | passes |
+| End to end: `#->` completes; with the options set through `initializationOptions`, `\to` inserts `→ ` and `{-#` gets nothing; with `"none"` there is no completion provider; a wrong `symbolInput` gives a warning | passes |
+
+### Also fixed: real paths on macOS
+
+On macOS the end-to-end test failed, also before these changes: Agda names
+files by their real path (`/private/var/…` for `/var/…`, which is a symbolic
+link), so errors in a file opened as `/var/…` landed at the start of the file,
+and go to definition into another file pointed outside the project. The
+bridge now recognises Agda's real path in messages and maps definition
+targets back into the worktree.
+
+### To check in Zed
+
+1. Reinstall the bridge and restart the language server.
+2. Type `#->`, `#acute(e)` and `#macron(diaer(u))`.
+3. Set `"symbolTrailingSpace": true` and `"symbolOnlyAfterWhitespace": true`
+   in `lsp.agda-bridge.initialization_options`, restart the language server,
+   and type `\to` and a pragma.
 
 ## Done: goal commands
 

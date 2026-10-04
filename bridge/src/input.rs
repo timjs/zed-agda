@@ -1,28 +1,93 @@
 //! Unicode input through completions, because a Zed extension cannot add an
 //! input method: `\` followed by an abbreviation of Agda's Emacs input
-//! method, as in `\to` for `→`, or `#` followed by the name of a Typst
-//! symbol, as in `#arrow.r` for `→`.
+//! method, as in `\to` for `→`, or `#` followed by Typst's notation: the name
+//! of a symbol (`#arrow.r`), a math shorthand (`#->`) or an accent
+//! (`#acute(e)` for `é`).
 //!
 //! The abbreviations are agda2-vscode's dump of Agda's `agda-input.el`, which
 //! includes the TeX input method of Emacs (see `THIRD-PARTY-NOTICES.md`). The
-//! Typst symbols come from the `codex` crate, which Typst itself uses.
+//! Typst symbols come from the `codex` crate, which Typst itself uses; the
+//! shorthands and accents from Typst's documentation.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::OnceLock;
 
 use codex::{Def, Module};
+use serde_json::Value;
+use unicode_normalization::UnicodeNormalization;
 
 /// At most this many candidates are offered at once; typing more of the
 /// name narrows them down.
 pub const LIMIT: usize = 200;
 
+/// How symbols are typed, from the initialization options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// `\` and Agda's abbreviations, which include LaTeX's names.
+    pub latex: bool,
+    /// `#` and Typst's notation.
+    pub typst: bool,
+    /// Whether a leader only counts at the start of a line or after
+    /// whitespace, so that `{-#` or `x\y` stay as they are.
+    pub only_after_whitespace: bool,
+    /// Whether a space follows the symbol, unless one is already there.
+    pub trailing_space: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            latex: true,
+            typst: true,
+            only_after_whitespace: false,
+            trailing_space: false,
+        }
+    }
+}
+
+impl Options {
+    /// Read `symbolInput` (`"both"`, `"latex"`, `"typst"` or `"none"`),
+    /// `symbolTrailingSpace` and `symbolOnlyAfterWhitespace`. Values of the
+    /// wrong kind keep their default and are reported.
+    pub fn from_initialization(options: &Value) -> (Options, Vec<String>) {
+        let mut result = Options::default();
+        let mut problems = Vec::new();
+        match &options["symbolInput"] {
+            Value::Null => {}
+            Value::String(mode) if mode == "both" => {}
+            Value::String(mode) if mode == "latex" => result.typst = false,
+            Value::String(mode) if mode == "typst" => result.latex = false,
+            Value::String(mode) if mode == "none" => (result.latex, result.typst) = (false, false),
+            other => problems.push(format!(
+                "`symbolInput` must be \"both\", \"latex\", \"typst\" or \"none\", not {other}."
+            )),
+        }
+        let mut flag = |key: &str, field: &mut bool| match &options[key] {
+            Value::Null => {}
+            Value::Bool(value) => *field = *value,
+            other => problems.push(format!("`{key}` must be true or false, not {other}.")),
+        };
+        flag("symbolTrailingSpace", &mut result.trailing_space);
+        flag(
+            "symbolOnlyAfterWhitespace",
+            &mut result.only_after_whitespace,
+        );
+        (result, problems)
+    }
+
+    /// Whether any symbol input is on.
+    pub fn enabled(&self) -> bool {
+        self.latex || self.typst
+    }
+}
+
 /// A symbol to offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
-    /// The name with its leader, as in `\to` or `#arrow.r`.
+    /// The name with its leader, as in `\to`, `#arrow.r` or `#->`.
     pub name: String,
-    pub symbol: &'static str,
+    pub symbol: String,
 }
 
 /// The candidates for what is being typed before the cursor.
@@ -34,6 +99,18 @@ pub struct Completions {
     pub candidates: Vec<Candidate>,
     /// Whether more candidates matched than were kept.
     pub truncated: bool,
+    /// Whether a space should follow the symbol.
+    pub space_after: bool,
+}
+
+impl Completions {
+    /// The text that replaces the leader and what was typed after it.
+    pub fn insertion(&self, candidate: &Candidate) -> String {
+        match self.space_after {
+            true => format!("{} ", candidate.symbol),
+            false => candidate.symbol.clone(),
+        }
+    }
 }
 
 /// The non-word characters that can continue an abbreviation or a Typst
@@ -50,34 +127,50 @@ pub fn trigger_characters() -> Vec<String> {
 
 /// The candidates for the input that ends at UTF-16 `column` of `line`, if
 /// an abbreviation or a Typst name is being typed there.
-pub fn complete(line: &str, column: u32) -> Option<Completions> {
+pub fn complete(line: &str, column: u32, options: &Options) -> Option<Completions> {
     let before = prefix_utf16(line, column)?;
-    let candidate = |leader: char| {
-        move |(name, symbol): (&str, &'static str)| Candidate {
-            name: format!("{leader}{name}"),
-            symbol,
-        }
+    let candidates = |leader: char, found: Vec<(String, String)>| -> Vec<Candidate> {
+        found
+            .into_iter()
+            .map(|(name, symbol)| Candidate {
+                name: format!("{leader}{name}"),
+                symbol,
+            })
+            .collect()
     };
-    let (typed, mut candidates): (&str, Vec<Candidate>) =
-        if let Some(typed) = abbreviation_at(before) {
-            let found = abbreviations(typed);
-            (typed, found.into_iter().map(candidate('\\')).collect())
-        } else {
-            let typed = symbol_name_at(before)?;
-            let found = symbols(typed);
-            let found = found.iter().map(|(name, symbol)| (name.as_str(), *symbol));
-            (typed, found.map(candidate('#')).collect())
-        };
+    // An abbreviation first, so `\#` stays Agda's `♯`; when it has no
+    // candidates, a Typst name may still follow a `#` in it.
+    let latex = options
+        .latex
+        .then(|| typed_after('\\', before, options))
+        .flatten()
+        .map(|typed| {
+            let found = abbreviations(typed)
+                .into_iter()
+                .map(|(name, symbol)| (name.to_string(), symbol.to_string()))
+                .collect();
+            (typed, candidates('\\', found))
+        })
+        .filter(|(_, found)| !found.is_empty());
+    let (typed, mut candidates) = latex.or_else(|| {
+        let typed = options
+            .typst
+            .then(|| typed_after('#', before, options))
+            .flatten()?;
+        Some((typed, candidates('#', typst(typed))))
+    })?;
     if candidates.is_empty() {
         return None;
     }
     let truncated = candidates.len() > LIMIT;
     candidates.truncate(LIMIT);
     let leader_length = 1 + typed.encode_utf16().count() as u32;
+    let next = line[before.len()..].chars().next();
     Some(Completions {
         start: column - leader_length,
         candidates,
         truncated,
+        space_after: options.trailing_space && next.is_none_or(|c| !c.is_whitespace()),
     })
 }
 
@@ -94,26 +187,19 @@ fn prefix_utf16(line: &str, column: u32) -> Option<&str> {
     (units == column).then_some(line)
 }
 
-/// The abbreviation typed after the last `\` of `before`, if no whitespace
-/// follows that `\`.
-fn abbreviation_at(before: &str) -> Option<&str> {
-    let start = before.rfind(|c: char| c == '\\' || c.is_whitespace())?;
-    before[start..]
-        .starts_with('\\')
-        .then(|| &before[start + 1..])
-}
-
-/// The Typst name typed after a `#` at the start of `before` or after
-/// whitespace; elsewhere `#` belongs to Agda, as in the pragma `{-#`.
-fn symbol_name_at(before: &str) -> Option<&str> {
-    let start = before
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
-        .filter(|&i| before[i..].starts_with('#'))?;
-    let ok = before[..start]
+/// What was typed after the last `leader` of `before`, if no whitespace
+/// follows it, and, with `only_after_whitespace`, if whitespace or the start
+/// of the line comes before it.
+fn typed_after<'a>(leader: char, before: &'a str, options: &Options) -> Option<&'a str> {
+    let start = before.rfind(|c: char| c == leader || c.is_whitespace())?;
+    if !before[start..].starts_with(leader) {
+        return None;
+    }
+    let after_whitespace = before[..start]
         .chars()
         .next_back()
         .is_none_or(char::is_whitespace);
-    ok.then(|| &before[start + 1..])
+    (after_whitespace || !options.only_after_whitespace).then(|| &before[start + 1..])
 }
 
 /// Whether `symbol` can be seen and is worth typing: not plain ASCII, and
@@ -254,16 +340,146 @@ fn symbols(typed: &str) -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// Typst's math shorthands, from the list in its documentation of symbols.
+const SHORTHANDS: &[(&str, &str)] = &[
+    ("...", "…"),
+    ("-", "−"),
+    ("*", "∗"),
+    ("~", "∼"),
+    ("!=", "≠"),
+    (":=", "≔"),
+    ("::=", "⩴"),
+    ("=:", "≕"),
+    ("<<", "≪"),
+    ("<<<", "⋘"),
+    (">>", "≫"),
+    (">>>", "⋙"),
+    ("<=", "≤"),
+    (">=", "≥"),
+    ("->", "→"),
+    ("-->", "⟶"),
+    ("|->", "↦"),
+    (">->", "↣"),
+    ("->>", "↠"),
+    ("<-", "←"),
+    ("<--", "⟵"),
+    ("<-<", "↢"),
+    ("<<-", "↞"),
+    ("<->", "↔"),
+    ("<-->", "⟷"),
+    ("~>", "⇝"),
+    ("~~>", "⟿"),
+    ("<~", "⇜"),
+    ("<~~", "⬳"),
+    ("=>", "⇒"),
+    ("|=>", "⤇"),
+    ("==>", "⟹"),
+    ("<==", "⟸"),
+    ("<=>", "⇔"),
+    ("<==>", "⟺"),
+    ("[|", "⟦"),
+    ("|]", "⟧"),
+    ("||", "‖"),
+];
+
+/// Typst's accents, from its documentation of `accent`, as the combining
+/// characters Typst puts over the base.
+const ACCENTS: &[(&str, char)] = &[
+    ("grave", '\u{300}'),
+    ("acute", '\u{301}'),
+    ("hat", '\u{302}'),
+    ("tilde", '\u{303}'),
+    ("macron", '\u{304}'),
+    ("dash", '\u{305}'),
+    ("breve", '\u{306}'),
+    ("dot", '\u{307}'),
+    ("dot.double", '\u{308}'),
+    ("diaer", '\u{308}'),
+    ("dot.triple", '\u{20DB}'),
+    ("dot.quad", '\u{20DC}'),
+    ("circle", '\u{30A}'),
+    ("acute.double", '\u{30B}'),
+    ("caron", '\u{30C}'),
+    ("arrow", '\u{20D7}'),
+    ("arrow.l", '\u{20D6}'),
+    ("arrow.l.r", '\u{20E1}'),
+    ("harpoon", '\u{20D1}'),
+    ("harpoon.lt", '\u{20D0}'),
+];
+
+/// The candidates for what was typed after `#`: an accent, shorthands that
+/// start with it, and symbol names.
+fn typst(typed: &str) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = accented(typed).into_iter().collect();
+    let mut shorthands: Vec<&(&str, &str)> = SHORTHANDS
+        .iter()
+        .filter(|(shorthand, _)| shorthand.starts_with(typed))
+        .collect();
+    shorthands.sort_by_key(|(shorthand, _)| (*shorthand != typed, shorthand.len()));
+    found.extend(
+        shorthands
+            .into_iter()
+            .map(|(shorthand, symbol)| (shorthand.to_string(), symbol.to_string())),
+    );
+    if typed.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        found.extend(
+            symbols(typed)
+                .into_iter()
+                .map(|(name, symbol)| (name, symbol.to_string())),
+        );
+    }
+    found
+}
+
+/// An accent as Typst writes it in math, `acute(e)`, perhaps without its
+/// closing parenthesis yet, and around a letter, a symbol name or another
+/// accent (`macron(diaer(u))` for `ǖ`). The result is composed into one
+/// character where Unicode has one.
+fn accented(typed: &str) -> Option<(String, String)> {
+    let (name, rest) = typed.split_once('(')?;
+    let mark = ACCENTS.iter().find(|(accent, _)| *accent == name)?.1;
+    let inner = rest.strip_suffix(')').unwrap_or(rest);
+    let (inner_name, base) = if inner.contains('(') {
+        accented(inner)?
+    } else {
+        accent_base(inner)?
+    };
+    let symbol: String = base.chars().chain([mark]).nfc().collect();
+    Some((format!("{name}({inner_name})"), symbol))
+}
+
+/// The base of an accent: one character, or the name of a Typst symbol.
+fn accent_base(inner: &str) -> Option<(String, String)> {
+    let mut chars = inner.chars();
+    match (chars.next(), chars.next()) {
+        (None, _) => None,
+        (Some(c), None) if !c.is_whitespace() => Some((inner.to_string(), inner.to_string())),
+        _ => symbol_table()
+            .iter()
+            .find(|variant| variant.path() == inner)
+            .map(|variant| (inner.to_string(), variant.symbol.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Completion with the default options.
+    fn complete(line: &str, column: u32) -> Option<Completions> {
+        super::complete(line, column, &Options::default())
+    }
 
     fn names(completions: &Completions) -> Vec<(&str, &str)> {
         completions
             .candidates
             .iter()
-            .map(|candidate| (candidate.name.as_str(), candidate.symbol))
+            .map(|candidate| (candidate.name.as_str(), candidate.symbol.as_str()))
             .collect()
+    }
+
+    fn pair(name: &str, symbol: &str) -> (String, String) {
+        (name.to_string(), symbol.to_string())
     }
 
     fn end(line: &str) -> u32 {
@@ -271,10 +487,10 @@ mod tests {
     }
 
     /// The first candidate for `line` with the cursor at its end.
-    fn first(line: &str) -> (String, &'static str) {
+    fn first(line: &str) -> (String, String) {
         let found = complete(line, end(line)).unwrap();
         let candidate = &found.candidates[0];
-        (candidate.name.clone(), candidate.symbol)
+        (candidate.name.clone(), candidate.symbol.clone())
     }
 
     #[test]
@@ -289,11 +505,11 @@ mod tests {
         assert!(found.candidates.iter().all(|c| c.name.starts_with("\\to")));
 
         // Abbreviations with punctuation, case and several symbols.
-        assert_eq!(first("\\->"), ("\\->".to_string(), "→"));
-        assert_eq!(first("\\=="), ("\\==".to_string(), "≡"));
-        assert_eq!(first("\\bN"), ("\\bN".to_string(), "ℕ"));
-        assert_eq!(first("\\Gl"), ("\\Gl".to_string(), "λ"));
-        assert_eq!(first("\\_1"), ("\\_1".to_string(), "₁"));
+        assert_eq!(first("\\->"), pair("\\->", "→"));
+        assert_eq!(first("\\=="), pair("\\==", "≡"));
+        assert_eq!(first("\\bN"), pair("\\bN", "ℕ"));
+        assert_eq!(first("\\Gl"), pair("\\Gl", "λ"));
+        assert_eq!(first("\\_1"), pair("\\_1", "₁"));
         let l = complete("\\l", 2).unwrap();
         assert_eq!(names(&l)[..2], [("\\l", "←"), ("\\l", "⇐")]);
     }
@@ -336,33 +552,121 @@ mod tests {
                 .all(|(name, _)| name.starts_with("#arrow."))
         );
 
-        assert_eq!(first("#NN"), ("#NN".to_string(), "ℕ"));
-        assert_eq!(first("#alph"), ("#alpha".to_string(), "α"));
+        assert_eq!(first("#NN"), pair("#NN", "ℕ"));
+        assert_eq!(first("#alph"), pair("#alpha", "α"));
         // Modifiers in any order, the last one partly typed.
-        assert_eq!(first("#arrow.long.r"), ("#arrow.r.long".to_string(), "⟶"));
-        assert_eq!(first("#arrow.r.doub"), ("#arrow.r.double".to_string(), "⇒"));
+        assert_eq!(first("#arrow.long.r"), pair("#arrow.r.long", "⟶"));
+        assert_eq!(first("#arrow.r.doub"), pair("#arrow.r.double", "⇒"));
         // A symbol in a nested module.
-        assert_eq!(
-            first("#gender.fem"),
-            ("#gender.female".to_string(), "♀\u{FE0E}")
-        );
+        assert_eq!(first("#gender.fem"), pair("#gender.female", "♀\u{FE0E}"));
         // Without modifiers, Typst takes the first variant; it comes first.
-        assert_eq!(first("#arrow"), ("#arrow.r".to_string(), "→"));
+        assert_eq!(first("#arrow"), pair("#arrow.r", "→"));
     }
 
     #[test]
-    fn hash_only_after_whitespace() {
-        // Agda's own `#`, in pragmas and names, is left alone.
-        assert_eq!(complete("{-#", 3), None);
-        assert_eq!(complete("x#y", 3), None);
-        // The `#` that closes a pragma follows a space, so it opens the menu,
-        // but the `-` after it closes it again.
-        assert!(complete("{-# OPTIONS --safe #", 20).is_some());
-        assert_eq!(complete("{-# OPTIONS --safe #-", 21), None);
-        assert!(complete("# x", 1).is_some());
-        assert!(complete("a #", 3).is_some());
-        // Typst names only have letters and dots.
-        assert_eq!(complete("a #-", 4), None);
+    fn typst_shorthands_and_accents_after_a_hash() {
+        // Math shorthands, the exact one first.
+        let found = complete("f : A #->", 9).unwrap();
+        assert_eq!(found.start, 6);
+        assert_eq!(names(&found)[..2], [("#->", "→"), ("#->>", "↠")]);
+        assert_eq!(first("#=>"), pair("#=>", "⇒"));
+        assert_eq!(first("#[|"), pair("#[|", "⟦"));
+        assert_eq!(first("#!="), pair("#!=", "≠"));
+        // `-` alone is the minus sign, and `...` the ellipsis.
+        assert_eq!(first("#-"), pair("#-", "−"));
+        assert_eq!(first("#..."), pair("#...", "…"));
+        // Accents, with or without the closing parenthesis, composed where
+        // Unicode has one character.
+        assert_eq!(first("#acute(e)"), pair("#acute(e)", "é"));
+        assert_eq!(first("#diaer(o"), pair("#diaer(o)", "ö"));
+        assert_eq!(first("#macron(diaer(U))"), pair("#macron(diaer(U))", "Ǖ"));
+        assert_eq!(first("#hat(alpha)"), pair("#hat(alpha)", "α\u{302}"));
+        assert_eq!(first("#arrow(x)"), pair("#arrow(x)", "x\u{20D7}"));
+        // An unknown accent or base gives nothing.
+        assert_eq!(complete("#acute(zz)", 10), None);
+        assert_eq!(complete("#sharp(e)", 9), None);
+    }
+
+    #[test]
+    fn options_choose_the_leaders_and_where_they_count() {
+        let both = Options::default();
+        // By default both leaders count anywhere, also in a pragma.
+        assert!(super::complete("x#NN", 4, &both).is_some());
+        assert!(super::complete("x\\to", 4, &both).is_some());
+        assert!(super::complete("{-#", 3, &both).is_some());
+        // Only after whitespace: for both leaders alike.
+        let spaced = Options {
+            only_after_whitespace: true,
+            ..both
+        };
+        assert_eq!(super::complete("x#NN", 4, &spaced), None);
+        assert_eq!(super::complete("x\\to", 4, &spaced), None);
+        assert_eq!(super::complete("{-#", 3, &spaced), None);
+        assert!(super::complete("a #NN", 5, &spaced).is_some());
+        assert!(super::complete("\\to", 3, &spaced).is_some());
+        // One leader only, or none.
+        let latex = Options {
+            typst: false,
+            ..both
+        };
+        let typst = Options {
+            latex: false,
+            ..both
+        };
+        let none = Options {
+            latex: false,
+            typst: false,
+            ..both
+        };
+        assert!(super::complete("\\to", 3, &latex).is_some());
+        assert_eq!(super::complete("#NN", 3, &latex), None);
+        assert_eq!(super::complete("\\to", 3, &typst), None);
+        assert!(super::complete("#NN", 3, &typst).is_some());
+        assert_eq!(super::complete("\\to", 3, &none), None);
+        // `\#` stays Agda's sharp, and a Typst name may follow a `#` in a
+        // failed abbreviation.
+        assert_eq!(first("\\#"), pair("\\#", "♯"));
+        assert_eq!(first("\\zz#NN"), pair("#NN", "ℕ"));
+    }
+
+    #[test]
+    fn a_space_follows_when_asked_and_not_already_there() {
+        let options = Options {
+            trailing_space: true,
+            ..Options::default()
+        };
+        let found = super::complete("a \\to", 5, &options).unwrap();
+        assert_eq!(found.insertion(&found.candidates[0]), "→ ");
+        let found = super::complete("a \\to b", 5, &options).unwrap();
+        assert_eq!(found.insertion(&found.candidates[0]), "→");
+        let found = complete("a \\to", 5).unwrap();
+        assert_eq!(found.insertion(&found.candidates[0]), "→");
+    }
+
+    #[test]
+    fn reads_the_initialization_options() {
+        use serde_json::json;
+        let read = |value| Options::from_initialization(&value);
+        assert_eq!(read(json!({})), (Options::default(), vec![]));
+        let (options, problems) = read(json!({
+            "symbolInput": "typst",
+            "symbolTrailingSpace": true,
+            "symbolOnlyAfterWhitespace": true,
+        }));
+        assert!(problems.is_empty());
+        assert_eq!(
+            options,
+            Options {
+                latex: false,
+                typst: true,
+                only_after_whitespace: true,
+                trailing_space: true,
+            }
+        );
+        assert!(!read(json!({ "symbolInput": "none" })).0.enabled());
+        let (options, problems) = read(json!({ "symbolInput": "tex", "symbolTrailingSpace": 1 }));
+        assert_eq!(options, Options::default());
+        assert_eq!(problems.len(), 2);
     }
 
     #[test]
@@ -370,7 +674,7 @@ mod tests {
         // `\,` is a narrow no-break space in Emacs; `#paren.l` is `(`.
         assert!(
             complete("\\,", 2)
-                .is_none_or(|found| found.candidates.iter().all(|c| useful(c.symbol)))
+                .is_none_or(|found| found.candidates.iter().all(|c| useful(&c.symbol)))
         );
         assert!(abbreviation_table().values().flatten().all(|s| useful(s)));
         assert!(symbol_table().iter().all(|v| useful(v.symbol)));

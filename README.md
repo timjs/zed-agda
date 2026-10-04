@@ -28,7 +28,8 @@ page.
 ## Configuration
 
 The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
-`agda` on your `PATH`. Both can be set in Zed's `settings.json`:
+`agda` on your `PATH`. Both, and the bridge's other options, are set in Zed's
+`settings.json`:
 
 ```json
 "lsp": {
@@ -36,11 +37,27 @@ The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
     "binary": { "path": "/path/to/agda-bridge" },
     "initialization_options": {
       "agdaPath": "/path/to/agda",
-      "outputFile": ".zed/agda-output.md"
+      "outputFile": ".zed/agda-output.md",
+      "symbolInput": "both",
+      "symbolTrailingSpace": false,
+      "symbolOnlyAfterWhitespace": false
     }
   }
 }
 ```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `agdaPath` | `"agda"` | the Agda program |
+| `extraArgs` | `[]` | extra command line arguments for Agda, such as `["--safe"]` |
+| `outputFile` | `".zed/agda-output.md"` | where Agda's answers appear, relative to the project root (see below) |
+| `symbolInput` | `"both"` | how symbols are typed: `"latex"` (`\to`), `"typst"` (`#arrow.r`), `"both"` or `"none"` (see [Unicode input](#unicode-input)) |
+| `symbolTrailingSpace` | `false` | put a space after a completed symbol, unless one is already there |
+| `symbolOnlyAfterWhitespace` | `false` | let `\` and `#` start a symbol only at the start of a line or after whitespace, so that `{-#` and `x\y` never open the menu |
+
+The bridge reads these options when it starts: after a change, run `editor:
+restart language server` from the command palette. A wrong value is reported
+and its default used instead.
 
 `outputFile` is the Markdown file where Agda's answers appear (the equivalent
 of Emacs's `*Agda information*` buffer), relative to the project root. Add it
@@ -53,8 +70,10 @@ opening reveal an output file that is already open in another pane, instead of
 opening a second copy.
 
 Agda's own highlighting, including backgrounds for unsolved metas and
-termination or coverage problems, arrives as semantic tokens, which Zed only
-uses when they are switched on:
+termination or coverage problems, arrives as semantic tokens. Whether Zed uses
+them is Zed's own setting, `semantic_tokens`, which is `"off"` by default for
+every language; an extension cannot change that default, so switch it on for
+Agda yourself (and set it to `"off"` again to switch Agda's highlighting off):
 
 ```json
 "languages": {
@@ -75,11 +94,21 @@ split, save the file to load the new clauses.
 
 ## Unicode input
 
-Type `\` and an abbreviation of Agda's Emacs mode (`\to`, `\all`, `\bN`,
-`\Gl`), or `#` and the name of a [Typst symbol](https://typst.app/docs/reference/symbols/sym/)
-(`#arrow.r`, `#NN`, `#lt.eq`), and pick the symbol from the completion menu
-with `tab` or `enter`. A `#` only starts a Typst name at the start of a line or
-after a space, so pragmas such as `{-# OPTIONS --safe #-}` are left alone.
+Type a leader and a name, and pick the symbol from the completion menu with
+`tab` or `enter`:
+
+| You type | You get | Notation |
+| --- | --- | --- |
+| `\to`, `\all`, `\bN`, `\Gl`, `\'e` | `→ ∀ ℕ λ é` | the abbreviations of Agda's Emacs mode, which include LaTeX's names |
+| `#arrow.r`, `#forall`, `#NN`, `#alpha` | `→ ∀ ℕ α` | the names of [Typst's symbols](https://typst.app/docs/reference/symbols/sym/), with modifiers in any order |
+| `#->`, `#=>`, `#<=`, `#!=`, `#[\|` | `→ ⇒ ≤ ≠ ⟦` | Typst's [math shorthands](https://typst.app/docs/reference/symbols/#shorthands) |
+| `#acute(e)`, `#diaer(o)`, `#hat(alpha)` | `é ö α̂` | Typst's [accents](https://typst.app/docs/reference/math/accent/), also nested, as in `#macron(diaer(u))` for `ǖ` |
+
+The options `symbolInput`, `symbolTrailingSpace` and `symbolOnlyAfterWhitespace`
+above choose the notations, a space after the symbol, and whether a leader
+also counts in the middle of a word. By default `\` and `#` count anywhere, so
+the `#` of a pragma such as `{-# OPTIONS --safe #-}` also opens the menu; the
+next character, a space or `-`, closes it again.
 
 ## Debugging
 

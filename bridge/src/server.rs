@@ -69,6 +69,8 @@ struct Config {
     /// Whether the client accepts `LocationLink`s for go to definition, which
     /// carry the range of the name (Zed underlines it on `cmd`-hover).
     link_support: bool,
+    /// How symbols are typed.
+    symbols: input::Options,
 }
 
 #[derive(Default)]
@@ -323,6 +325,23 @@ impl Bridge {
         self.config.get()?.root.as_deref()
     }
 
+    /// `path` as seen from the worktree. Agda names files by their real
+    /// path, which differs from the worktree's when that has a symbolic link
+    /// (on macOS `/var` is `/private/var`); Zed would then open the file
+    /// outside the project.
+    fn in_worktree(&self, path: &Path) -> PathBuf {
+        let Some(root) = self.root() else {
+            return path.to_path_buf();
+        };
+        match root.canonicalize() {
+            Ok(real_root) if real_root != root => match path.strip_prefix(&real_root) {
+                Ok(rest) => root.join(rest),
+                Err(_) => path.to_path_buf(),
+            },
+            _ => path.to_path_buf(),
+        }
+    }
+
     /// Lock the Agda session, starting Agda on first use.
     async fn lock_session(&self) -> Result<MutexGuard<'_, Option<Session>>, String> {
         let mut guard = self.session.lock().await;
@@ -429,7 +448,20 @@ impl Bridge {
             .collect();
         let mut links = links::from_highlighting(&outcome.highlighting, path);
         let mut spans = highlight::from_highlighting(&outcome.highlighting);
-        let file = path.to_string_lossy();
+        // Agda names the file by its real path, which differs when the path
+        // has a symbolic link (on macOS `/tmp` is `/private/tmp`).
+        let file = match path.canonicalize() {
+            Ok(real)
+                if outcome
+                    .errors
+                    .iter()
+                    .chain(&outcome.warnings)
+                    .any(|message| message.starts_with(&*real.to_string_lossy())) =>
+            {
+                real.to_string_lossy().into_owned()
+            }
+            _ => path.to_string_lossy().into_owned(),
+        };
         let mut problems: Vec<Diagnostic> = outcome
             .errors
             .iter()
@@ -891,11 +923,19 @@ impl LanguageServer for Backend {
             .and_then(|text_document| text_document.definition.as_ref())
             .and_then(|definition| definition.link_support)
             .unwrap_or(false);
+        let (symbols, problems) = input::Options::from_initialization(&options);
+        for problem in problems {
+            self.0
+                .client
+                .show_message(MessageType::WARNING, format!("agda-bridge: {problem}"))
+                .await;
+        }
         let _ = self.0.config.set(Config {
             agda_path,
             extra_args,
             root,
             link_support,
+            symbols,
         });
 
         Ok(InitializeResult {
@@ -921,7 +961,7 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
-                completion_provider: Some(CompletionOptions {
+                completion_provider: symbols.enabled().then(|| CompletionOptions {
                     trigger_characters: Some(input::trigger_characters()),
                     ..CompletionOptions::default()
                 }),
@@ -1034,7 +1074,7 @@ impl LanguageServer for Backend {
                 return Ok(None);
             };
             let line = line.strip_suffix('\r').unwrap_or(line);
-            input::complete(line, position.character)
+            input::complete(line, position.character, &self.0.config().symbols)
         };
         let Some(found) = found else {
             return Ok(None);
@@ -1042,7 +1082,7 @@ impl LanguageServer for Backend {
         let range = Range::new(Position::new(position.line, found.start), position);
         let items = found
             .candidates
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(rank, candidate)| {
                 let code_points: Vec<String> = candidate
@@ -1052,7 +1092,7 @@ impl LanguageServer for Backend {
                     .collect();
                 CompletionItem {
                     // Zed shows the label and then the detail: `→ \to`.
-                    label: candidate.symbol.to_string(),
+                    label: candidate.symbol.clone(),
                     detail: Some(candidate.name.clone()),
                     documentation: Some(Documentation::String(code_points.join(" "))),
                     // Zed filters on the word before the cursor, which never
@@ -1061,7 +1101,7 @@ impl LanguageServer for Backend {
                     sort_text: Some(format!("{rank:04}")),
                     text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(
                         range,
-                        candidate.symbol.to_string(),
+                        found.insertion(candidate),
                     ))),
                     ..CompletionItem::default()
                 }
@@ -1132,7 +1172,7 @@ impl LanguageServer for Backend {
                         at,
                     )));
                 }
-                Target::File { path, position } => (origin, path.clone(), *position),
+                Target::File { path, position } => (origin, self.0.in_worktree(path), *position),
             }
         };
         // Agda's offsets refer to the file as it was on disk when it was
