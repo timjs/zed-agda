@@ -176,6 +176,62 @@ pub fn case_split(
     }
 }
 
+/// The text that adds a with-abstraction on `goal`, as Idris's "add with"
+/// does: the clause `lhs = {! e !}` becomes `lhs with e` and a clause
+/// `... | w = {!  !}` for its result, `w` being a name the clause does not
+/// use yet. Without an expression in the goal, the with-expression is a new
+/// goal. Only for a goal that is the whole right-hand side of a clause on one
+/// line; returns the replaced char range and its replacement.
+pub fn add_with(text: &str, goal: &Goal) -> Option<(usize, usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let line_start = chars[..goal.start]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |i| i + 1);
+    let indent: String = chars[line_start..]
+        .iter()
+        .take_while(|&&c| c == ' ' || c == '\t')
+        .collect();
+    let code_start = line_start + indent.chars().count();
+    let mut line_end = chars[goal.end..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |i| goal.end + i);
+    if line_end > goal.end && chars[line_end - 1] == '\r' {
+        line_end -= 1;
+    }
+    // `lhs =` before the goal, and nothing but a comment after it.
+    let before: String = chars[code_start..goal.start].iter().collect();
+    let lhs = before.trim_end().strip_suffix('=')?;
+    if lhs.is_empty() || !lhs.ends_with(char::is_whitespace) {
+        return None;
+    }
+    let lhs = lhs.trim_end();
+    let rest: String = chars[goal.end..line_end].iter().collect();
+    let comment = line_comment(&rest);
+    if comment.is_none() && !rest.trim().is_empty() {
+        return None;
+    }
+    let content = goal.content(text);
+    let expression = match content.is_empty() {
+        true => GOAL_MARKER.to_string(),
+        false => content.clone(),
+    };
+    let used = |name: &str| {
+        format!("{lhs} {content}")
+            .split(|c: char| c.is_whitespace() || "(){}\";.@".contains(c))
+            .any(|word| word == name)
+    };
+    let name = std::iter::once("w".to_string())
+        .chain(["₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"].map(|i| format!("w{i}")))
+        .find(|name| !used(name))?;
+    let replacement = format!(
+        "{lhs} with {expression}{}\n{indent}... | {name} = {GOAL_MARKER}",
+        comment.unwrap_or_default()
+    );
+    Some((code_start, line_end, replacement))
+}
+
 /// The line comment at the end of `rest`, with the whitespace before it: a
 /// `--` at the start or after whitespace (elsewhere it is part of a name).
 fn line_comment(rest: &str) -> Option<&str> {
@@ -376,5 +432,49 @@ mod tests {
             ),
             "g = λ where\n  zero → {!  !}\n  (suc x) → {!  !}\nh = g\n"
         );
+    }
+
+    /// Add a with-abstraction on the first goal in `text`.
+    fn with(text: &str) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let find = |pattern: [char; 2]| chars.windows(2).position(|w| w == pattern).unwrap();
+        let goal = Goal {
+            id: 0,
+            start: find(['{', '!']),
+            end: find(['!', '}']) + 2,
+        };
+        let (start, end, replacement) = add_with(text, &goal)?;
+        Some(
+            chars[..start]
+                .iter()
+                .copied()
+                .chain(replacement.chars())
+                .chain(chars[end..].iter().copied())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn adds_a_with_abstraction() {
+        // The expression in the goal becomes the with-expression.
+        assert_eq!(
+            with("f : ℕ → ℕ\nf n = {! even n !}\nx = y\n").unwrap(),
+            "f : ℕ → ℕ\nf n with even n\n... | w = {!  !}\nx = y\n"
+        );
+        // An empty goal gives a goal as with-expression; the indentation and
+        // a comment stay, and `w`, used in the clause, is not taken.
+        assert_eq!(
+            with("  where\n    g w = {!  !}  -- todo\n").unwrap(),
+            "  where\n    g w with {!  !}  -- todo\n    ... | w₁ = {!  !}\n"
+        );
+        // A nested with-clause.
+        assert_eq!(
+            with("... | x = {! y !}\n").unwrap(),
+            "... | x with y\n... | w = {!  !}\n"
+        );
+        // Not when the goal is only part of the right-hand side.
+        assert_eq!(with("f n = suc {! n !}\n"), None);
+        assert_eq!(with("f n = {! n !} + 1\n"), None);
+        assert_eq!(with("f = λ x → {! x !}\n"), None);
     }
 }

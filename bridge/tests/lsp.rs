@@ -372,6 +372,7 @@ fn drives_agda_through_lsp_and_debug_client() {
             "Give",
             "Refine",
             "Case split on suc (n + m)",
+            "Add with abstraction on suc (n + m)",
             "Auto",
             "Solve",
             "Solve all goals",
@@ -1006,6 +1007,7 @@ fn goal_commands() {
             "Give",
             "Refine",
             "Case split on n",
+            "Add with abstraction on n",
             "Auto",
             "Solve",
             "Solve all goals",
@@ -1120,6 +1122,30 @@ fn goal_commands() {
     assert_eq!(
         edits[0]["newText"],
         "zero + zero = {!  !}\nzero + suc m = {!  !}"
+    );
+    text = apply_all(&text, &edits);
+    version += 1;
+    change(&mut client, &text, version);
+
+    // A with-abstraction on `suc n + m = {!  !}`, with a goal as its
+    // expression; after saving, Agda accepts it and numbers its goals.
+    let edits = run(&mut client, "agda.addWith", json!([goals_uri, 1]));
+    assert_eq!(
+        edits[0]["newText"],
+        "suc n + m with {!  !}\n... | w = {!  !}"
+    );
+    text = apply_all(&text, &edits);
+    version += 1;
+    change(&mut client, &text, version);
+    std::fs::write(&goals, &text).unwrap();
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": goals_uri } }),
+    );
+    let diagnostics = client.diagnostics(&goals_uri, |d| d.len() == 6);
+    assert!(
+        diagnostics.iter().all(|d| d["severity"] == 3),
+        "{diagnostics:#?}"
     );
 
     client.request("shutdown", Value::Null);

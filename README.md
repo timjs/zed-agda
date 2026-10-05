@@ -60,11 +60,9 @@ Changes apply at once, without restarting anything: a new `agdaPath` or
 `extraArgs` restarts Agda at the next load, a new `outputFile` is used for the
 next answer. A wrong value is reported and its default used instead.
 
-Zed decides what may go under `lsp.agda-bridge` (`binary`,
-`initialization_options`, `settings` and a few more), so the settings cannot
-sit directly under `agda-bridge`; `settings` is Zed's place for a language
-server's own settings. Settings under `initialization_options`, where earlier
-versions read them, still work; `settings` wins when both have one.
+Zed decides what may go under `lsp.agda-bridge` (`binary`, `settings` and a
+few more), so the settings cannot sit directly under `agda-bridge`; `settings`
+is Zed's place for a language server's own settings.
 
 `outputFile` is the Markdown file where Agda's answers appear (the equivalent
 of Emacs's `*Agda information*` buffer), relative to the project root. Add it
@@ -98,18 +96,32 @@ diagnostics, hover shows a goal's type and context, and a lone `?` becomes
 `{!  !}`. The code actions on a goal (`cmd-.` on macOS, `ctrl-.` on Linux)
 give, refine, case split, auto and solve it, or solve all goals. An empty goal
 offers a case split on each variable of its context, and on the result; with
-variables typed in the goal, it splits on those. After a case split, save the
-file to load the new clauses.
+variables typed in the goal, it splits on those. When the goal is the whole
+right-hand side of a clause, `Add with abstraction` turns `f n = {! e !}` into
+`f n with e` and `... | w = {!  !}`, as Idris's "add with" does. After a case
+split or a with-abstraction, save the file to load the new clauses.
 
 ## Renaming
 
-Rename a name with Zed's `editor: rename` (`F2`): every place where Agda found
+Rename a name with Zed's Rename Symbol (`F2`, or in the menu of a right click):
+every place where Agda found
 that name changes, in all Agda files open in Zed. Renaming one part of an
 operator renames the operator (`⊕` on the `+` of `n + m` makes `_+_` into
 `_⊕_`). It works on what Agda checked at the last save, so save first; text in
 goals, which Agda does not check, and files that are not open stay as they are.
 Afterwards a message lists the files that are not open but import the module
 and may use the name.
+
+A language server cannot save files in Zed, so the renamed files stay
+unsaved, and the next rename asks to save them first. Zed's `autosave` setting
+saves them for you; for this project only, in its `.zed/settings.json`:
+
+```json
+{ "autosave": "on_focus_change" }
+```
+
+Every save loads the file in Agda again, so a short delay
+(`{ "after_delay": { "milliseconds": 1000 } }`) also checks while you type.
 
 ## Unicode input
 

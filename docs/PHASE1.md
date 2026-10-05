@@ -444,9 +444,9 @@ cannot sit directly under `lsp.agda-bridge`: Zed's `LspSettings`
 extension API hands an extension only the first three. `settings` is Zed's
 field for a server's own settings, so they moved there.
 
-1. **The extension** (`src/lib.rs`) merges `initialization_options` and
-   `settings` (which wins) and passes the result both as initialization
-   options, so Agda starts with the right program, and as the workspace
+1. **The extension** (`src/lib.rs`) passes `settings` both as
+   initialization options, so Agda starts with the right program, and as the
+   workspace
    configuration, which Zed sends with `workspace/didChangeConfiguration`
    after the start and after every change (`crates/project/src/lsp_store.rs`).
 2. **The bridge** (`bridge/src/settings.rs`) reads them with the same checks
@@ -476,6 +476,61 @@ Zed (renaming `suc`, a case split), which made three end-to-end tests wait
 for goals that were no longer there. The tests ran against the committed
 fixtures instead, in a separate worktree; the edited file was left as it was.
 To try things in Zed, a copy outside `tests/fixtures` keeps the tests intact.
+
+## Done: no more `initialization_options`; with-abstraction; on rename
+
+### Settings only under `settings`
+
+The extension no longer reads `lsp.agda-bridge.initialization_options`; the
+settings are only read from `lsp.agda-bridge.settings`. (The extension still
+hands them to the bridge as initialization options at its start, which is how
+Agda starts with the right program; that is internal.)
+
+### Add with abstraction
+
+A code action on a goal that is the whole right-hand side of a clause on one
+line, after Idris's "add with", which adds a `with` and a clause for its
+result. Agda has no
+command for it, so the bridge rewrites the clause itself (`goals::add_with`):
+
+```agda
+f n = {! even n !}
+```
+
+becomes
+
+```agda
+f n with even n
+... | w = {!  !}
+```
+
+The goal's text becomes the with-expression; an empty goal gives a goal
+there (`f n with {!  !}`), which Agda accepts. The name `w` is replaced by
+`w₁`, `w₂` and so on when the clause already uses it; a comment after the
+goal stays; `...` also works in a with-clause itself. Checked against Agda
+2.8.0: both forms load, and a case split on `w` gives `... | true = ?` and
+`... | false = ?`. As after a case split, the new goals get numbers when the
+file is saved.
+
+### A `Rename` code action, and saving after a rename: not possible
+
+- A code action can run a command on the server, or one of two commands Zed
+  handles itself (a task, or showing locations; `try_handle_client_command`
+  in `crates/editor/src/code_lens.rs`); none opens Zed's rename prompt, and
+  LSP has no way for a server to ask for a text. Zed does show Rename Symbol
+  in the menu of a right click (`crates/editor/src/mouse_context_menu.rs`),
+  next to Go to Definition.
+- LSP has no request to save a file, so a language server cannot save the
+  renamed files. Writing them to disk behind Zed's back would race with its
+  buffers. Zed's own `autosave` setting does it, also for one project in its
+  `.zed/settings.json`; the README shows how.
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| The with-abstraction: the goal's text as expression, an empty goal, the indentation, a comment, `w` taken so `w₁`, a with-clause; not for part of a right-hand side or a lambda | passes |
+| End to end: the code actions offer `Add with abstraction on n`; after a case split, the with-abstraction on `suc n + m = {!  !}` gives `suc n + m with {!  !}` and `... \| w = {!  !}`, and after saving Agda accepts the file with six goals and no errors | passes |
 
 ## Next steps
 

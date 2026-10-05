@@ -125,6 +125,7 @@ async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
         "auto" => bridge.give(&request.file, id, GoalCommand::Auto).await,
         "case-split" => bridge.case_split(&request.file, id, None).await,
         "solve" => bridge.solve(&request.file, Some(id)).await,
+        "add-with" => bridge.add_with(&request.file, id).await,
         "goal" => {
             let markdown = bridge.goal_info(&request.file, id, true).await?;
             bridge
@@ -137,7 +138,7 @@ async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
 }
 
 const USAGE: &str = "usage: agda-bridge client \
-                     <load|goal|give|refine|case-split|auto|solve|solve-all> --file FILE \
+                     <load|goal|give|refine|case-split|add-with|auto|solve|solve-all> --file FILE \
                      [--root DIR] [--row N --column N]";
 
 /// The `agda-bridge client` subcommand. Returns the process exit code.

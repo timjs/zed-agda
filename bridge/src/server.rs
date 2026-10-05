@@ -34,6 +34,7 @@ pub const COMMAND_CASE_SPLIT: &str = "agda.caseSplit";
 pub const COMMAND_AUTO: &str = "agda.auto";
 pub const COMMAND_SOLVE: &str = "agda.solve";
 pub const COMMAND_SOLVE_ALL: &str = "agda.solveAll";
+pub const COMMAND_ADD_WITH: &str = "agda.addWith";
 pub const COMMAND_OPEN_OUTPUT: &str = "agda.openOutput";
 
 /// The extensions Agda accepts, as listed in its `InvalidExtensionError`.
@@ -809,6 +810,37 @@ impl Bridge {
         ))
     }
 
+    /// Add a with-abstraction on a goal, as Idris's "add with" does; Agda has
+    /// no command for it, so the bridge rewrites the clause itself. The new
+    /// goals get numbers when the file is saved and loaded again.
+    pub async fn add_with(&self, path: &Path, id: u32) -> Result<String, String> {
+        let edit = {
+            let mut documents = self.documents.lock().unwrap();
+            let document = documents.get_mut(path).ok_or("This file is not open.")?;
+            let goal = document
+                .goals
+                .iter()
+                .find(|goal| goal.id == id)
+                .cloned()
+                .ok_or(format!(
+                    "Goal ?{id} no longer exists. Save the file to reload it."
+                ))?;
+            let (start, end, replacement) = goals::add_with(&document.text, &goal).ok_or(
+                "A with-abstraction needs a goal that is the whole right-hand side of a clause.",
+            )?;
+            document.replace(start, end, &replacement, false)
+        };
+        self.apply_edits(path, vec![edit]).await?;
+        self.publish(path).await;
+        self.show_output(
+            &format!("With abstraction ?{id}"),
+            path,
+            "Added a with-abstraction. Save the file to load it, so that its goals get numbers.\n",
+        )
+        .await;
+        Ok(format!("Added a with-abstraction on goal ?{id}."))
+    }
+
     /// Fill the goals that unification already solved, as Emacs does: Agda
     /// names a solution for each, which is then given. Only goal `id`, or
     /// all goals.
@@ -1206,6 +1238,7 @@ impl LanguageServer for Backend {
                         COMMAND_AUTO.into(),
                         COMMAND_SOLVE.into(),
                         COMMAND_SOLVE_ALL.into(),
+                        COMMAND_ADD_WITH.into(),
                         COMMAND_OPEN_OUTPUT.into(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -1496,8 +1529,10 @@ impl LanguageServer for Backend {
                 return Ok(None);
             };
             let offset = text::offset_of(&document.text, params.range.start);
-            let goal = goals::goal_at(&document.goals, offset)
-                .map(|goal| (goal.id, goal.content(&document.text)));
+            let goal = goals::goal_at(&document.goals, offset).map(|goal| {
+                let with = goals::add_with(&document.text, goal).is_some();
+                (goal.id, goal.content(&document.text), with)
+            });
             let line = params.range.start.line;
             let on_problem = document
                 .problems
@@ -1518,7 +1553,7 @@ impl LanguageServer for Backend {
             })
         };
         let mut actions = Vec::new();
-        if let Some((id, content)) = &goal {
+        if let Some((id, content, with)) = &goal {
             let id = *id;
             let rewrite = Some(CodeActionKind::REFACTOR_REWRITE);
             let goal_action = |title: &str, command: &str| {
@@ -1547,6 +1582,13 @@ impl LanguageServer for Backend {
                     &format!("Case split on {content}"),
                     COMMAND_CASE_SPLIT,
                 ));
+            }
+            if *with {
+                let title = match content.is_empty() {
+                    true => "Add with abstraction".to_string(),
+                    false => format!("Add with abstraction on {content}"),
+                };
+                actions.push(goal_action(&title, COMMAND_ADD_WITH));
             }
             actions.push(goal_action("Auto", COMMAND_AUTO));
             actions.push(goal_action("Solve", COMMAND_SOLVE));
@@ -1612,6 +1654,7 @@ impl LanguageServer for Backend {
                     bridge.case_split(&path, id, variable).await
                 }
                 (COMMAND_SOLVE, Some(id)) => bridge.solve(&path, Some(id)).await,
+                (COMMAND_ADD_WITH, Some(id)) => bridge.add_with(&path, id).await,
                 (COMMAND_GOAL, Some(id)) => match bridge.goal_info(&path, id, true).await {
                     Ok(markdown) => {
                         bridge

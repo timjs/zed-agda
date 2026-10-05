@@ -61,18 +61,10 @@ impl zed::Extension for AgdaExtension {
     }
 }
 
-/// The bridge's settings: `lsp.agda-bridge.settings` in Zed's settings, on top
-/// of `lsp.agda-bridge.initialization_options`, where earlier versions read
-/// them, so both places work.
+/// The bridge's settings: `lsp.agda-bridge.settings` in Zed's settings.
 fn bridge_settings(worktree: &zed::Worktree) -> Result<serde_json::Value> {
-    let lsp = LspSettings::for_worktree(BRIDGE, worktree)?;
-    let mut merged = serde_json::Map::new();
-    for value in [lsp.initialization_options, lsp.settings].into_iter().flatten() {
-        if let serde_json::Value::Object(object) = value {
-            merged.extend(object);
-        }
-    }
-    Ok(serde_json::Value::Object(merged))
+    let settings = LspSettings::for_worktree(BRIDGE, worktree)?.settings;
+    Ok(settings.unwrap_or_else(|| serde_json::Value::Object(Default::default())))
 }
 
 zed::register_extension!(AgdaExtension);
