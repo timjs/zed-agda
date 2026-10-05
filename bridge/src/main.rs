@@ -6,6 +6,7 @@
 //! - `agda-bridge client …`: send a command to a running server, for debugging.
 
 mod agda;
+mod clause;
 mod goals;
 mod highlight;
 mod input;

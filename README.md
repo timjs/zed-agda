@@ -40,7 +40,7 @@ The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
       "agdaPath": "/path/to/agda",
       "outputFile": ".zed/agda-output.md",
       "symbolInput": "both",
-      "symbolTrailingSpace": false,
+      "symbolTrailingSpace": true,
       "symbolOnlyAfterWhitespace": false
     }
   }
@@ -53,7 +53,7 @@ The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
 | `extraArgs` | `[]` | extra command line arguments for Agda, such as `["--safe"]` |
 | `outputFile` | `".zed/agda-output.md"` | where Agda's answers appear, relative to the project root (see below) |
 | `symbolInput` | `"both"` | how symbols are typed: `"latex"` (`\to`), `"typst"` (`#arrow.r`), `"both"` or `"none"` (see [Unicode input](#unicode-input)) |
-| `symbolTrailingSpace` | `false` | put a space after a completed symbol, unless one is already there |
+| `symbolTrailingSpace` | `true` | put a space after a completed symbol, unless one is already there |
 | `symbolOnlyAfterWhitespace` | `false` | let `\` and `#` start a symbol only at the start of a line or after whitespace, so that `{-#` and `x\y` never open the menu |
 
 Changes apply at once, without restarting anything: a new `agdaPath` or
@@ -93,35 +93,53 @@ seen yet (lines typed since the last save); `full` shows only Agda's.
 
 Opening or saving a file loads it in Agda. Goals then show their types as
 diagnostics, hover shows a goal's type and context, and a lone `?` becomes
-`{!  !}`. The code actions on a goal (`cmd-.` on macOS, `ctrl-.` on Linux)
-give, refine, case split, auto and solve it, or solve all goals. An empty goal
-offers a case split on each variable of its context, and on the result; with
-variables typed in the goal, it splits on those. When the goal is the whole
-right-hand side of a clause, `Add with abstraction` turns `f n = {! e !}` into
-`f n with e` and `... | w = {!  !}`, as Idris's "add with" does. After a case
-split or a with-abstraction, save the file to load the new clauses.
+`{!  !}`. The code actions (`cmd-.` on macOS, `ctrl-.` on Linux) are:
+
+| Where | Code action | Effect |
+| --- | --- | --- |
+| a type signature | `Add clause` | adds a clause below it, with a name for each argument from its type: `n + m = {!  !}` for `_+_ : ℕ → ℕ → ℕ` (as Idris's "add clause") |
+| a goal | `Give`, `Refine` | give or refine the goal with its text |
+| an empty goal | ``Case split on `n` `` | one for each variable of the goal's context that can be split |
+| an empty goal | `Case split on result` | introduce the missing patterns, or split on the result |
+| a goal with text | ``Case split on `x y` `` | split on the variables typed in the goal |
+| a goal that is a whole right-hand side | `With-abstract`, ``With-abstract `e` `` | `f n = {! e !}` becomes `f n with e` and `... \| w = {!  !}` (as Idris's "add with") |
+| a goal | `Auto`, `Solve`, `Solve all goals` | proof search, or the solutions unification already found |
+| a goal or an error | `Show goal in output`, `Open output file` | the output file |
+
+New clauses, from `Add clause`, a case split or `With-abstract`, are loaded
+when you save the file; until then their goals have no number.
 
 ## Renaming
 
-Rename a name with Zed's Rename Symbol (`F2`, or in the menu of a right click):
-every place where Agda found
-that name changes, in all Agda files open in Zed. Renaming one part of an
-operator renames the operator (`⊕` on the `+` of `n + m` makes `_+_` into
-`_⊕_`). It works on what Agda checked at the last save, so save first; text in
-goals, which Agda does not check, and files that are not open stay as they are.
-Afterwards a message lists the files that are not open but import the module
-and may use the name.
+Renaming is not a code action: Zed only lets a language server answer its own
+Rename Symbol, which asks for the new name. Start it with `F2`, `space r` in
+Helix mode, `g r n` in vim mode, or Rename Symbol in the menu of a right
+click. Every place where Agda found that name changes, in all Agda files open
+in Zed. Renaming one part of an operator renames the operator (`⊕` on the `+`
+of `n + m` makes `_+_` into `_⊕_`). It works on what Agda checked at the last
+save, so save first; text in goals, which Agda does not check, and files that
+are not open stay as they are. Afterwards a message lists the files that are
+not open but import the module and may use the name.
 
-A language server cannot save files in Zed, so the renamed files stay
-unsaved, and the next rename asks to save them first. Zed's `autosave` setting
-saves them for you; for this project only, in its `.zed/settings.json`:
+## Saving
 
-```json
-{ "autosave": "on_focus_change" }
-```
+**Auto save is not possible from the extension:** the language server
+protocol has no way for a server to save a file, so the files a rename or a
+code action changed stay unsaved, and Agda only checks them when you save.
+Workarounds:
 
-Every save loads the file in Agda again, so a short delay
-(`{ "after_delay": { "milliseconds": 1000 } }`) also checks while you type.
+- Save all files at once with `workspace: save all` (`cmd-alt-s` on macOS,
+  `ctrl-alt-s` on Linux).
+- Let Zed save by itself with its `autosave` setting, for this project only in
+  its `.zed/settings.json`:
+
+  ```json
+  { "autosave": "on_focus_change" }
+  ```
+
+  Every save loads the file in Agda again, so a short delay
+  (`{ "autosave": { "after_delay": { "milliseconds": 1000 } } }`) also checks
+  while you type.
 
 ## Unicode input
 

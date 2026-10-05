@@ -565,6 +565,60 @@ a parse error that takes in the declarations after it, so these show nested
 under the record (also an empty `data … where` right after an empty record).
 That is tree-sitter-agda's, not the query's.
 
+## Done: add clause, new titles, a space after symbols
+
+### Add clause
+
+A code action on the first line of a type signature, after Idris's "add
+clause": `_+_ : ℕ → ℕ → ℕ` gets `n + m = {!  !}` right below the signature.
+Agda has no command for it, so the bridge reads the signature's text
+(`bridge/src/clause.rs`):
+
+1. **Which lines.** `names : type` at the cursor, with the type going on over
+   more indented lines, but not in a block of constructors, fields,
+   postulates, generalised variables or primitives (the nearest less indented
+   line starts with `data`, `record`, `field`, `postulate`, `variable` or
+   `primitive`). One clause per name for `f g : …`.
+2. **Which arguments.** The type is split at its arrows outside brackets.
+   Implicit and instance arguments (`{A : Set}`, `⦃ _ ⦄`) get no pattern, as
+   Agda does not need one; named ones keep their name (`(n : ℕ)`, `∀ m n`).
+3. **Which names.** In the spirit of Idris's naming hints: `ℕ` gives `n`, `m`,
+   `k`, `l`, `j`; `List` and `Vec` give `xs`, `ys`, `zs`; a function type `f`,
+   `g`, `h`; `Set` `A`, `B`, `C`; an equality `p`, `q`, `r`; a type variable
+   `x`, `y`, `z`; `𝔹` `b`; `Fin` `i`; another type the first letter of its
+   name (`Tree A` gives `t`). A name already taken, by a binder or the
+   function itself, moves to the next one, and then to `n₁`, `n₂`.
+4. **Operators** are written in mixfix when every hole gets an argument:
+   `n + m`, `if b then x else y`; otherwise in prefix, as `_+_ n m k`.
+
+Checked with Agda 2.8: the clauses for `_+_`, `map`, `if_then_else_` and
+`replicate` (with implicit and named arguments) load without errors.
+
+### Titles and the space after a symbol
+
+- `Add with abstraction` is now `With-abstract`, with the expression in
+  backticks when the goal has one.
+- `Case split on` puts the variables in backticks (``Case split on `n` ``),
+  but not `result`, which is no variable.
+- `symbolTrailingSpace` is now on by default.
+
+### Renaming and saving
+
+Rename Symbol is started with `F2`, `space r` in Helix mode (`vim.json`,
+context `helix_normal`) or `g r n` in vim mode, or from the menu of a right
+click; the README now says so, and that auto save is not possible, with its
+workarounds (`workspace: save all`, `cmd-alt-s` on macOS, and Zed's
+`autosave` setting).
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| Names after types: `_+_`, `not`, `map`, `zipWith`, `sym`, `id`, `const` with `->`, `if_then_else_`, a constant, `Tree A`, six arguments of type `ℕ` | passes |
+| Names of binders: `(n : ℕ)`, `∀ {n} (xs : …) (i : …)`, `∀ m n`; an implicit `n` and a function named `n` push the name on | passes |
+| Signatures over several lines, in a `where` block, with a comment; one clause per name; not for constructors, fields, postulates, `data` lines, definitions, comments or lambdas | passes |
+| End to end: `Add clause` on the `_+_` signature and not on a constructor; it inserts `n + m = {!  !}` after the signature; the new titles; a space after `\to` by default | passes |
+
 ## Next steps
 
 1. **A hover cache**, so hover stays fast during long loads.

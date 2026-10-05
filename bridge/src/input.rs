@@ -31,7 +31,8 @@ pub struct Options {
     /// Whether a leader only counts at the start of a line or after
     /// whitespace, so that `{-#` or `x\y` stay as they are.
     pub only_after_whitespace: bool,
-    /// Whether a space follows the symbol, unless one is already there.
+    /// Whether a space follows the symbol, unless one is already there
+    /// (on by default).
     pub trailing_space: bool,
 }
 
@@ -41,7 +42,7 @@ impl Default for Options {
             latex: true,
             typst: true,
             only_after_whitespace: false,
-            trailing_space: false,
+            trailing_space: true,
         }
     }
 }
@@ -630,16 +631,16 @@ mod tests {
     }
 
     #[test]
-    fn a_space_follows_when_asked_and_not_already_there() {
+    fn a_space_follows_by_default_unless_already_there() {
+        let found = complete("a \\to", 5).unwrap();
+        assert_eq!(found.insertion(&found.candidates[0]), "→ ");
+        let found = complete("a \\to b", 5).unwrap();
+        assert_eq!(found.insertion(&found.candidates[0]), "→");
         let options = Options {
-            trailing_space: true,
+            trailing_space: false,
             ..Options::default()
         };
         let found = super::complete("a \\to", 5, &options).unwrap();
-        assert_eq!(found.insertion(&found.candidates[0]), "→ ");
-        let found = super::complete("a \\to b", 5, &options).unwrap();
-        assert_eq!(found.insertion(&found.candidates[0]), "→");
-        let found = complete("a \\to", 5).unwrap();
         assert_eq!(found.insertion(&found.candidates[0]), "→");
     }
 
@@ -650,7 +651,7 @@ mod tests {
         assert_eq!(read(json!({})), (Options::default(), vec![]));
         let (options, problems) = read(json!({
             "symbolInput": "typst",
-            "symbolTrailingSpace": true,
+            "symbolTrailingSpace": false,
             "symbolOnlyAfterWhitespace": true,
         }));
         assert!(problems.is_empty());
@@ -660,7 +661,7 @@ mod tests {
                 latex: false,
                 typst: true,
                 only_after_whitespace: true,
-                trailing_space: true,
+                trailing_space: false,
             }
         );
         assert!(!read(json!({ "symbolInput": "none" })).0.enabled());

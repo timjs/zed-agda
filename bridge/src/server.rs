@@ -25,7 +25,7 @@ use crate::protocol::{
 };
 use crate::settings::Settings;
 use crate::text::{self, Change};
-use crate::{input, iotcm, location, rename, render};
+use crate::{clause, input, iotcm, location, rename, render};
 
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
@@ -35,6 +35,7 @@ pub const COMMAND_AUTO: &str = "agda.auto";
 pub const COMMAND_SOLVE: &str = "agda.solve";
 pub const COMMAND_SOLVE_ALL: &str = "agda.solveAll";
 pub const COMMAND_ADD_WITH: &str = "agda.addWith";
+pub const COMMAND_ADD_CLAUSE: &str = "agda.addClause";
 pub const COMMAND_OPEN_OUTPUT: &str = "agda.openOutput";
 
 /// The extensions Agda accepts, as listed in its `InvalidExtensionError`.
@@ -841,6 +842,38 @@ impl Bridge {
         Ok(format!("Added a with-abstraction on goal ?{id}."))
     }
 
+    /// Add a clause for the type signature on `line`, as Idris's "add clause"
+    /// does, right after the signature. Agda has no command for it; the
+    /// clause comes from the signature's text (see `clause.rs`), and its goal
+    /// gets a number when the file is saved and loaded again.
+    pub async fn add_clause(&self, path: &Path, line: usize) -> Result<String, String> {
+        let edit = {
+            let mut documents = self.documents.lock().unwrap();
+            let document = documents.get_mut(path).ok_or("This file is not open.")?;
+            let signature = clause::signature_at(&document.text, line)
+                .ok_or("There is no type signature on this line to add a clause for.")?;
+            // The end of the signature's last line, in chars.
+            let end: usize = document
+                .text
+                .split('\n')
+                .take(signature.last_line + 1)
+                .map(|line| line.chars().count() + 1)
+                .sum::<usize>()
+                - 1;
+            let last = document
+                .text
+                .split('\n')
+                .nth(signature.last_line)
+                .unwrap_or("");
+            let end = end - usize::from(last.ends_with('\r'));
+            let clauses = format!("\n{}", clause::clauses(&signature));
+            document.replace(end, end, &clauses, false)
+        };
+        self.apply_edits(path, vec![edit]).await?;
+        self.publish(path).await;
+        Ok("Added a clause. Save the file to load it.".into())
+    }
+
     /// Fill the goals that unification already solved, as Emacs does: Agda
     /// names a solution for each, which is then given. Only goal `id`, or
     /// all goals.
@@ -1239,6 +1272,7 @@ impl LanguageServer for Backend {
                         COMMAND_SOLVE.into(),
                         COMMAND_SOLVE_ALL.into(),
                         COMMAND_ADD_WITH.into(),
+                        COMMAND_ADD_CLAUSE.into(),
                         COMMAND_OPEN_OUTPUT.into(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -1523,7 +1557,7 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&uri) else {
             return Ok(None);
         };
-        let (goal, on_problem) = {
+        let (goal, on_problem, signature) = {
             let documents = self.0.documents.lock().unwrap();
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
@@ -1538,7 +1572,8 @@ impl LanguageServer for Backend {
                 .problems
                 .iter()
                 .any(|problem| problem.range.start.line <= line && line <= problem.range.end.line);
-            (goal, on_problem)
+            let signature = clause::signature_at(&document.text, line as usize).is_some();
+            (goal, on_problem, signature)
         };
         let action = |title: String, command: &str, arguments: Vec<Value>, kind| {
             CodeActionOrCommand::CodeAction(CodeAction {
@@ -1553,6 +1588,15 @@ impl LanguageServer for Backend {
             })
         };
         let mut actions = Vec::new();
+        if signature {
+            let line = params.range.start.line;
+            actions.push(action(
+                "Add clause".into(),
+                COMMAND_ADD_CLAUSE,
+                vec![json!(uri.as_str()), json!(line)],
+                Some(CodeActionKind::REFACTOR_REWRITE),
+            ));
+        }
         if let Some((id, content, with)) = &goal {
             let id = *id;
             let rewrite = Some(CodeActionKind::REFACTOR_REWRITE);
@@ -1570,7 +1614,7 @@ impl LanguageServer for Backend {
             if content.is_empty() {
                 for variable in self.0.goal_split_variables(&path, id).await {
                     actions.push(action(
-                        format!("Case split on {variable}"),
+                        format!("Case split on `{variable}`"),
                         COMMAND_CASE_SPLIT,
                         vec![json!(uri.as_str()), json!(id), json!(variable)],
                         rewrite.clone(),
@@ -1579,14 +1623,14 @@ impl LanguageServer for Backend {
                 actions.push(goal_action("Case split on result", COMMAND_CASE_SPLIT));
             } else {
                 actions.push(goal_action(
-                    &format!("Case split on {content}"),
+                    &format!("Case split on `{content}`"),
                     COMMAND_CASE_SPLIT,
                 ));
             }
             if *with {
                 let title = match content.is_empty() {
-                    true => "Add with abstraction".to_string(),
-                    false => format!("Add with abstraction on {content}"),
+                    true => "With-abstract".to_string(),
+                    false => format!("With-abstract `{content}`"),
                 };
                 actions.push(goal_action(&title, COMMAND_ADD_WITH));
             }
@@ -1655,6 +1699,8 @@ impl LanguageServer for Backend {
                 }
                 (COMMAND_SOLVE, Some(id)) => bridge.solve(&path, Some(id)).await,
                 (COMMAND_ADD_WITH, Some(id)) => bridge.add_with(&path, id).await,
+                // For this command the number is a line, not a goal.
+                (COMMAND_ADD_CLAUSE, Some(line)) => bridge.add_clause(&path, line as usize).await,
                 (COMMAND_GOAL, Some(id)) => match bridge.goal_info(&path, id, true).await {
                     Ok(markdown) => {
                         bridge

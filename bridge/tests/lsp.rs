@@ -371,8 +371,8 @@ fn drives_agda_through_lsp_and_debug_client() {
         [
             "Give",
             "Refine",
-            "Case split on suc (n + m)",
-            "Add with abstraction on suc (n + m)",
+            "Case split on `suc (n + m)`",
+            "With-abstract `suc (n + m)`",
             "Auto",
             "Solve",
             "Solve all goals",
@@ -794,7 +794,8 @@ fn completes_unicode_input() {
         )
     };
 
-    // `\to` becomes `→`: the edit replaces the abbreviation and its leader.
+    // `\to` becomes `→` and, by default, a space: the edit replaces the
+    // abbreviation and its leader.
     let result = complete(&mut client, 0, 10);
     assert_eq!(result["isIncomplete"], false);
     let first = &result["items"][0];
@@ -803,7 +804,7 @@ fn completes_unicode_input() {
     assert_eq!(first["filterText"], "to");
     assert_eq!(first["documentation"], "U+2192");
     text = apply(&text, &first["textEdit"]);
-    assert!(text.starts_with("id : A →\n"), "{text}");
+    assert!(text.starts_with("id : A → \n"), "{text}");
 
     // Columns are UTF-16 units, and `𝔹` takes two of them.
     let result = complete(&mut client, 1, 10);
@@ -883,10 +884,10 @@ fn completes_unicode_input() {
     assert_eq!(complete(&mut client, 0, 10), Value::Null);
     configure(
         &mut client,
-        json!({ "symbolInput": "latex", "symbolTrailingSpace": true }),
+        json!({ "symbolInput": "latex", "symbolTrailingSpace": false }),
     );
     let result = complete(&mut client, 0, 10);
-    assert_eq!(result["items"][0]["textEdit"]["newText"], "→ ");
+    assert_eq!(result["items"][0]["textEdit"]["newText"], "→");
     client.received.clear();
     configure(&mut client, json!({ "symbolInput": "tex" }));
     let message = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
@@ -1006,8 +1007,8 @@ fn goal_commands() {
         [
             "Give",
             "Refine",
-            "Case split on n",
-            "Add with abstraction on n",
+            "Case split on `n`",
+            "With-abstract `n`",
             "Auto",
             "Solve",
             "Solve all goals",
@@ -1113,7 +1114,7 @@ fn goal_commands() {
     // that can be split (`m : ℕ`, not the function `f`), and on the result.
     let titles = client.code_actions(&goals_uri, json!({ "line": 10, "character": 14 }));
     assert!(
-        titles.contains(&"Case split on m".to_string())
+        titles.contains(&"Case split on `m`".to_string())
             && titles.contains(&"Case split on result".to_string())
             && !titles.iter().any(|t| t == "Give"),
         "{titles:?}"
@@ -1146,6 +1147,19 @@ fn goal_commands() {
     assert!(
         diagnostics.iter().all(|d| d["severity"] == 3),
         "{diagnostics:#?}"
+    );
+
+    // On a type signature, `Add clause` adds a clause right below it, with
+    // names from the types; a constructor gets none.
+    let titles = client.code_actions(&goals_uri, json!({ "line": 9, "character": 0 }));
+    assert_eq!(titles, ["Add clause"]);
+    let titles = client.code_actions(&goals_uri, json!({ "line": 3, "character": 2 }));
+    assert!(!titles.iter().any(|t| t == "Add clause"), "{titles:?}");
+    let edits = run(&mut client, "agda.addClause", json!([goals_uri, 9]));
+    assert_eq!(edits[0]["newText"], "\nn + m = {!  !}");
+    assert_eq!(
+        edits[0]["range"]["start"],
+        json!({ "line": 9, "character": 15 })
     );
 
     client.request("shutdown", Value::Null);

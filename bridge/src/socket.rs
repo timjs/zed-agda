@@ -108,9 +108,10 @@ async fn handle(bridge: Arc<Bridge>, stream: tokio::net::UnixStream) -> io::Resu
 }
 
 async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
-    match request.command.as_str() {
-        "load" => return bridge.load(&request.file).await,
-        "solve-all" => return bridge.solve(&request.file, None).await,
+    match (request.command.as_str(), request.row) {
+        ("load", _) => return bridge.load(&request.file).await,
+        ("solve-all", _) => return bridge.solve(&request.file, None).await,
+        ("add-clause", Some(row)) => return bridge.add_clause(&request.file, row - 1).await,
         _ => {}
     }
     let (Some(row), Some(column)) = (request.row, request.column) else {
@@ -138,7 +139,7 @@ async fn execute(bridge: &Bridge, request: Request) -> Result<String, String> {
 }
 
 const USAGE: &str = "usage: agda-bridge client \
-                     <load|goal|give|refine|case-split|add-with|auto|solve|solve-all> --file FILE \
+                     <load|goal|give|refine|case-split|add-with|add-clause|auto|solve|solve-all> --file FILE \
                      [--root DIR] [--row N --column N]";
 
 /// The `agda-bridge client` subcommand. Returns the process exit code.
