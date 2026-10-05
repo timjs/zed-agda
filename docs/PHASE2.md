@@ -392,8 +392,13 @@ Still to do in this phase:
    expression over its free variables (`Cmd_helper_function`); the bridge
    adds that signature, and a clause for it, above the definition the goal is
    in, and calls it in the goal.
-4. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+4. **The goal's type with the type of its expression**, as a code action on a
+   goal with an expression, with Agda's answer in the output file
+   (`Cmd_goal_type_context_infer`): the goal's type and context, and the type
+   of what is typed in it, to compare the two.
+5. **The normal form of the goal's expression**, as a code action on a goal
+   with an expression, with the answer in the output file (`Cmd_compute`).
+6. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.
 
-The hover cache and the remaining goal commands that only show information
-moved to phase 3, optimisations ([`PHASE3.md`](PHASE3.md)).
+The hover cache moved to phase 3, optimisations ([`PHASE3.md`](PHASE3.md)).

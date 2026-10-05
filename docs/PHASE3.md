@@ -1,9 +1,10 @@
 # Phase 3: optimisations
 
 Phase 3 makes what phases 1 and 2 ([`PHASE1.md`](PHASE1.md),
-[`PHASE2.md`](PHASE2.md)) built faster, and adds two goal commands that only
-show information. Nothing of it is done yet. Why a name is in scope and
-creating a helper function belong to phase 2, polish.
+[`PHASE2.md`](PHASE2.md)) built faster. Nothing of it is done yet. The goal
+commands that only show information (the goal's type with the type of its
+expression, the normal form, why a name is in scope) and creating a helper
+function belong to phase 2, polish.
 
 ## Subsumes the original phase 3
 
@@ -18,8 +19,8 @@ leaders, and prompts in the terminal. This phase replaces it:
   keymap are gone.
 - `agda-bridge client` and its socket stay, as a tool for debugging.
 - What the tasks were for, Agda's commands with a typed expression, comes back
-  below as code actions on goals, where the expression is the goal's text
-  instead of a prompt.
+  in phase 2 as code actions on goals ([`PHASE2.md`](PHASE2.md), "Next
+  steps"), where the expression is the goal's text instead of a prompt.
 
 ## Planned
 
@@ -27,8 +28,3 @@ leaders, and prompts in the terminal. This phase replaces it:
    context, and only when Agda is not busy, so during a long load it says
    "Agda is busy". The bridge could keep the last answer per goal, filled
    after every load, and show it, marked as possibly old, while Agda works.
-2. **Goal commands that only show information**, as code actions on a goal,
-   with the answer in the output file:
-   - the goal's type together with the type of the expression in it
-     (`Cmd_goal_type_context_infer`);
-   - the normal form of the expression in it (`Cmd_compute`).

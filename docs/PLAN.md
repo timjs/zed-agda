@@ -531,7 +531,8 @@ Why direction 2 still:
 
 Since then, phase 3 has become "Optimisations" ([`PHASE3.md`](PHASE3.md)):
 the tasks route was dropped after phase 0, and what phase 3 was for, Agda's
-commands with a typed expression, comes back there as code actions.
+commands with a typed expression, comes back in phase 2 as code actions
+([`PHASE2.md`](PHASE2.md)).
 
 ### 9.2 Risks and open questions
 
