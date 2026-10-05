@@ -1,8 +1,9 @@
 # Phase 3: optimisations
 
 Phase 3 makes what phases 1 and 2 ([`PHASE1.md`](PHASE1.md),
-[`PHASE2.md`](PHASE2.md)) built faster, and adds the goal commands that only
-show information. Nothing of it is done yet.
+[`PHASE2.md`](PHASE2.md)) built faster, and adds two goal commands that only
+show information. Nothing of it is done yet. Why a name is in scope and
+creating a helper function belong to phase 2, polish.
 
 ## Subsumes the original phase 3
 
@@ -30,7 +31,4 @@ leaders, and prompts in the terminal. This phase replaces it:
    with the answer in the output file:
    - the goal's type together with the type of the expression in it
      (`Cmd_goal_type_context_infer`);
-   - the normal form of the expression in it (`Cmd_compute`);
-   - why a name is in scope (`Cmd_why_in_scope`);
-   - the type of a helper function for the expression in it
-     (`Cmd_helper_function`).
+   - the normal form of the expression in it (`Cmd_compute`).

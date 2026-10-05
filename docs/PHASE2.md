@@ -378,10 +378,22 @@ is bound in Zed's vim keymap.
 
 ## Next steps
 
-The hover cache and the goal commands that only show information moved to
-phase 3, optimisations ([`PHASE3.md`](PHASE3.md)). Still open from this phase:
+Still to do in this phase:
 
-1. Stretch goal: hover showing the type of any name in scope at the top
-   level.
-2. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+1. **Hover showing the type of a name**, for any name in scope at the top
+   level, outside goals (no longer a stretch goal). Agda answers
+   `Cmd_infer_toplevel` with the type of an expression; hover on a symbol
+   still says how to type it.
+2. **Why a name is in scope**, as a code action on a name, with Agda's answer
+   (`Cmd_why_in_scope`, or `Cmd_why_in_scope_toplevel` outside a goal) in the
+   output file: where the name was defined or imported from.
+3. **Create a helper function**, as a code action on a goal with an
+   expression: Agda gives the type of a function that abstracts the goal's
+   expression over its free variables (`Cmd_helper_function`); the bridge
+   adds that signature, and a clause for it, above the definition the goal is
+   in, and calls it in the goal.
+4. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.
+
+The hover cache and the remaining goal commands that only show information
+moved to phase 3, optimisations ([`PHASE3.md`](PHASE3.md)).
