@@ -354,12 +354,19 @@ fn drives_agda_through_lsp_and_debug_client() {
         client.hover(&spike_uri, json!({ "line": 0, "character": 0 })),
         ""
     );
-    // Elsewhere, hover on a symbol says how to type it.
+    // Elsewhere, hover on a name shows its type, and on a symbol how to
+    // type it; both for `ℕ`.
     let hover = client.hover(&spike_uri, position_of(&text, "ℕ", 0));
     assert!(
-        hover.starts_with("`ℕ` (U+2115) is typed with `\\bN`") && hover.contains("`#NN`"),
+        hover.starts_with("```agda\nℕ : Set\n```\n`ℕ` (U+2115) is typed with `\\bN`")
+            && hover.contains("`#NN`"),
         "{hover}"
     );
+    // A part of an operator stands for the whole operator.
+    let hover = client.hover(&spike_uri, position_of(&text, "+ m = m", 0));
+    assert_eq!(hover, "```agda\n_+_ : ℕ → ℕ → ℕ\n```");
+    // A bound variable is not in scope at the top level: nothing to show.
+    assert_eq!(client.hover(&spike_uri, position_of(&text, "m = m", 0)), "");
 
     // Go to definition in the same file: `ℕ` in the type of `_+_` leads to
     // `data ℕ` on line 3.
@@ -568,6 +575,11 @@ fn drives_agda_through_lsp_and_debug_client() {
     assert_eq!(
         client.definition(&uses_uri, position_of(&uses_text, "open", 0)),
         Value::Null
+    );
+    // Hover shows the type of a name from the imported module.
+    assert_eq!(
+        client.hover(&uses_uri, position_of(&uses_text, "suc", 0)),
+        "```agda\nsuc : ℕ → ℕ\n```"
     );
 
     client.request("shutdown", Value::Null);

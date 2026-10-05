@@ -120,6 +120,15 @@ pub fn solve_one(file: &Path, goal: u32) -> String {
     )
 }
 
+/// `Cmd_infer_toplevel Simplified "<expr>"`: the type of an expression in the
+/// scope at the top level of the current file.
+pub fn infer_toplevel(file: &Path, expr: &str) -> String {
+    iotcm(
+        file,
+        &format!("Cmd_infer_toplevel Simplified {}", haskell_quote(expr)),
+    )
+}
+
 /// `Cmd_solveAll AsIs`: the solutions of all goals that unification already
 /// found.
 pub fn solve_all(file: &Path) -> String {
@@ -175,5 +184,9 @@ mod tests {
             envelope(r#"Cmd_solveOne Simplified 5 noRange """#)
         );
         assert_eq!(solve_all(file), envelope("Cmd_solveAll AsIs"));
+        assert_eq!(
+            infer_toplevel(file, "_+_"),
+            envelope(r#"Cmd_infer_toplevel Simplified "_+_""#)
+        );
     }
 }

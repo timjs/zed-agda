@@ -85,6 +85,7 @@ pub fn display_info(raw: &Value) -> String {
             goal_info,
         } => goal(interaction_point.id, &goal_info),
         DisplayInfo::Auto { info } => format!("## Auto\n\n{info}\n"),
+        DisplayInfo::InferredType { expr } => format!("```agda\n{expr}\n```\n"),
         DisplayInfo::Other => format!(
             "```json\n{}\n```\n",
             serde_json::to_string_pretty(raw).unwrap_or_default()

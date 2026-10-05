@@ -187,6 +187,8 @@ pub enum DisplayInfo {
     },
     /// What auto says when it found nothing, as in "No solution found".
     Auto { info: String },
+    /// The type Agda inferred for an expression.
+    InferredType { expr: String },
     #[serde(other)]
     Other,
 }
@@ -384,6 +386,14 @@ mod tests {
                 solutions[0].expression.as_str()
             ),
             (5, "ℕ")
+        );
+
+        let inferred = r#"{"info":{"commandState":{"currentFile":["/x/P.agda","2026-10-05T13:13:24Z"],"interactionPoints":[]},"expr":"ℕ → ℕ","kind":"InferredType","time":null},"kind":"DisplayInfo"}"#;
+        let Response::DisplayInfo { info } = parse_line(inferred).unwrap() else {
+            panic!("expected DisplayInfo");
+        };
+        assert!(
+            matches!(DisplayInfo::parse(&info), DisplayInfo::InferredType { expr } if expr == "ℕ → ℕ")
         );
 
         let auto = r#"{"info":{"info":"No solution found","kind":"Auto"},"kind":"DisplayInfo"}"#;

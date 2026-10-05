@@ -89,6 +89,9 @@ struct Document {
     loaded_text: Option<String>,
     /// The variables a goal's context offers for a case split, once known.
     split_variables: HashMap<u32, Vec<String>>,
+    /// The types of names hovered since the last load; `None` when Agda had
+    /// none, as for a name that is not in scope at the top level.
+    name_types: HashMap<String, Option<String>>,
     /// When Agda last checked this text, to tell whether links into another
     /// file are older than that file's last check.
     loaded_at: Option<std::time::Instant>,
@@ -207,6 +210,8 @@ struct Outcome {
     solutions: Option<Vec<Solution>>,
     /// What auto said when it found nothing.
     auto: Option<String>,
+    /// The type Agda inferred for an expression.
+    inferred: Option<String>,
     goal_info: Option<(u32, GoalInfo)>,
     displays: Vec<Value>,
     highlighting: Vec<HighlightingEntry>,
@@ -263,6 +268,7 @@ impl Outcome {
                             goal_info,
                         } => outcome.goal_info = Some((interaction_point.id, goal_info)),
                         DisplayInfo::Auto { info } => outcome.auto = Some(info),
+                        DisplayInfo::InferredType { expr } => outcome.inferred = Some(expr),
                         DisplayInfo::Other => {}
                     }
                     outcome.displays.push(info);
@@ -561,6 +567,7 @@ impl Bridge {
             document.loaded_text = Some(snapshot);
             document.loaded_at = Some(std::time::Instant::now());
             document.split_variables.clear();
+            document.name_types.clear();
             if opened {
                 document.expand_question_marks()
             } else {
@@ -609,6 +616,35 @@ impl Bridge {
             }
             None => Err(outcome.errors.join("\n")),
         }
+    }
+
+    /// The type of the expression `name` in the scope at the top level of
+    /// `path`, for hover: from the cache, or asked from Agda when it is not
+    /// busy and `path` is its current file.
+    async fn name_type(&self, path: &Path, name: &str) -> Option<String> {
+        if let Some(known) = self
+            .documents
+            .lock()
+            .unwrap()
+            .get(path)
+            .and_then(|document| document.name_types.get(name).cloned())
+        {
+            return known;
+        }
+        let mut guard = self.session.try_lock().ok()?;
+        Self::check_current(&guard, path).ok()?;
+        let responses = self
+            .run(&mut guard, &iotcm::infer_toplevel(path, name))
+            .await
+            .ok()?;
+        drop(guard);
+        let inferred = Outcome::collect(responses).inferred;
+        if let Some(document) = self.documents.lock().unwrap().get_mut(path) {
+            document
+                .name_types
+                .insert(name.to_string(), inferred.clone());
+        }
+        inferred
     }
 
     /// The variables of goal `id` to offer for a case split: from the cache,
@@ -1033,6 +1069,66 @@ impl Bridge {
         }
     }
 
+    /// Hover outside goals: the type of the name under the cursor, given as
+    /// its range, its text and its definition site, and how to type the
+    /// symbol under it, given as its range and the Markdown.
+    async fn hover_outside_goals(
+        &self,
+        path: &Path,
+        name: Option<(Range, String, (PathBuf, usize))>,
+        typing: Option<(Range, String)>,
+    ) -> Option<Hover> {
+        let typed = match name {
+            Some((range, occurrence, (site_path, site))) => {
+                let expression = self.expression_for(&occurrence, &site_path, site);
+                self.name_type(path, &expression)
+                    .await
+                    .map(|ty| (range, format!("```agda\n{expression} : {ty}\n```")))
+            }
+            None => None,
+        };
+        let (range, value) = match (typed, typing) {
+            (Some((range, ty)), Some((_, how))) => (range, format!("{ty}\n{how}")),
+            (Some(found), None) | (None, Some(found)) => found,
+            (None, None) => return None,
+        };
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            }),
+            range: Some(range),
+        })
+    }
+
+    /// The expression to ask Agda the type of, for a name written as
+    /// `occurrence` and defined at `site` in `site_path`: the name as written,
+    /// or, for a part of an operator such as `+`, the whole operator `_+_`
+    /// with the qualifier written before the part.
+    fn expression_for(&self, occurrence: &str, site_path: &Path, site: usize) -> String {
+        let defined = {
+            let documents = self.documents.lock().unwrap();
+            match documents.get(site_path) {
+                Some(document) => Some(document.text.clone()),
+                None => std::fs::read_to_string(site_path).ok(),
+            }
+        }
+        .map(|text| {
+            text.chars()
+                .skip(site)
+                .take_while(|c| !c.is_whitespace() && !"(){}\";.@".contains(*c))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+        let base = rename::unqualified(occurrence);
+        let qualifier = &occurrence[..occurrence.len() - base.len()];
+        let is_part = defined.contains('_') && defined.split('_').any(|part| part == base);
+        match is_part && base != defined {
+            true => format!("{qualifier}{defined}"),
+            false => occurrence.to_string(),
+        }
+    }
+
     /// The edits that rename the name at `position` in `path` to `new`, in
     /// every open document, and a summary for the user.
     fn rename_edits(
@@ -1424,27 +1520,45 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&position.text_document.uri) else {
             return Ok(None);
         };
-        let (goal, range) = {
+        // On a goal: the goal. Elsewhere: the type of the name, and how to
+        // type the symbol under the cursor.
+        let found = {
             let documents = self.0.documents.lock().unwrap();
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
             };
             let offset = text::offset_of(&document.text, position.position);
-            let Some(goal) = goals::goal_at(&document.goals, offset) else {
-                // Not on a goal: how to type the symbol under the cursor.
-                let symbols = self.0.settings().symbols;
-                let Some((start, end, symbol)) = input::symbol_at(&document.text, offset) else {
-                    return Ok(None);
-                };
-                return Ok(input::how_to_type(&symbol, &symbols).map(|markdown| Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: markdown,
-                    }),
-                    range: Some(range_of(&document.text, start, end)),
-                }));
-            };
-            (goal.id, range_of(&document.text, goal.start, goal.end))
+            match goals::goal_at(&document.goals, offset) {
+                Some(goal) => Ok((goal.id, range_of(&document.text, goal.start, goal.end))),
+                None => {
+                    let symbols = self.0.settings().symbols;
+                    let typing = input::symbol_at(&document.text, offset).and_then(
+                        |(start, end, symbol)| {
+                            let markdown = input::how_to_type(&symbol, &symbols)?;
+                            Some((range_of(&document.text, start, end), markdown))
+                        },
+                    );
+                    let name = links::link_at(&document.links, offset)
+                        .filter(|link| !link.local)
+                        .map(|link| {
+                            let occurrence: String = document
+                                .text
+                                .chars()
+                                .skip(link.start)
+                                .take(link.end - link.start)
+                                .collect();
+                            let range = range_of(&document.text, link.start, link.end);
+                            (range, occurrence, self.0.definition_site(&path, link))
+                        });
+                    Err((name, typing))
+                }
+            }
+        };
+        let (goal, range) = match found {
+            Ok(goal) => goal,
+            Err((name, typing)) => {
+                return Ok(self.0.hover_outside_goals(&path, name, typing).await);
+            }
         };
         let markdown = self
             .0

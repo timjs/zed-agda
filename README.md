@@ -93,8 +93,10 @@ seen yet (lines typed since the last save); `full` shows only Agda's.
 ## Goals
 
 Opening or saving a file loads it in Agda. Goals then show their types as
-diagnostics, hover shows a goal's type and context, and a lone `?` becomes
-`{!  !}`. The code actions (`cmd-.` on macOS, `ctrl-.` on Linux) are:
+diagnostics, and a lone `?` becomes `{!  !}`. Hover shows a goal's type and
+context, and elsewhere the type of a name that is in scope at the top level
+(as `suc : ℕ → ℕ`), in the file Agda loaded last. The code actions (`cmd-.`
+on macOS, `ctrl-.` on Linux) are:
 
 | Where | Code action | Effect |
 | --- | --- | --- |

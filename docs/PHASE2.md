@@ -376,29 +376,56 @@ is bound in Zed's vim keymap.
 | The symbol under the cursor, with a variation selector; nothing for ASCII, a space or beyond the text | passes |
 | End to end: hover on `ℕ` outside a goal shows `\bN` and `#NN`; the new titles | passes |
 
+## Done: hover showing the type of a name
+
+Outside goals, hover on a name shows its type, asked from Agda with
+`Cmd_infer_toplevel Simplified "<name>"`, which answers
+`{"kind": "InferredType", "expr": "ℕ → ℕ"}` (checked with Agda 2.8.0):
+
+```agda
+suc : ℕ → ℕ
+```
+
+1. **Which name.** The link under the cursor, from Agda's highlighting, as it
+   is written (`N.suc` stays qualified). A part of an operator (`+` in
+   `n + m`) stands for the whole operator: the bridge reads the name at the
+   definition site (`_+_`) and keeps the qualifier, so `N.+` asks for
+   `N._+_`.
+2. **Which names have no type to show.** Agda answers in the scope at the top
+   level of its current file, so a bound variable (left out from the start), a
+   name from a `where` block, and a name of an inner module written without its
+   module (`three` for `Inner.three`) give "Not in scope", and hover shows
+   nothing for them. Only the file Agda loaded last can be asked.
+3. **Speed.** The answers, also the "nothing", are kept per file until its
+   next load, and Agda is only asked when it is not busy, so hover never waits
+   for a load.
+4. **With a symbol** such as `ℕ`, the type comes first and how to type the
+   symbol after it.
+
+| Check | Result |
+| --- | --- |
+| Agda's `InferredType` answer is read; the command is built | passes |
+| End to end: `ℕ : Set` with how to type `ℕ`; `_+_ : ℕ → ℕ → ℕ` from the `+` of `zero + m`; nothing for the bound `m`; `suc : ℕ → ℕ` imported in `Uses.agda` | passes; fails when the operator part is asked as written |
+
 ## Next steps
 
 Still to do in this phase:
 
-1. **Hover showing the type of a name**, for any name in scope at the top
-   level, outside goals (no longer a stretch goal). Agda answers
-   `Cmd_infer_toplevel` with the type of an expression; hover on a symbol
-   still says how to type it.
-2. **Why a name is in scope**, as a code action on a name, with Agda's answer
+1. **Why a name is in scope**, as a code action on a name, with Agda's answer
    (`Cmd_why_in_scope`, or `Cmd_why_in_scope_toplevel` outside a goal) in the
    output file: where the name was defined or imported from.
-3. **Create a helper function**, as a code action on a goal with an
+2. **Create a helper function**, as a code action on a goal with an
    expression: Agda gives the type of a function that abstracts the goal's
    expression over its free variables (`Cmd_helper_function`); the bridge
    adds that signature, and a clause for it, above the definition the goal is
    in, and calls it in the goal.
-4. **The goal's type with the type of its expression**, as a code action on a
+3. **The goal's type with the type of its expression**, as a code action on a
    goal with an expression, with Agda's answer in the output file
    (`Cmd_goal_type_context_infer`): the goal's type and context, and the type
    of what is typed in it, to compare the two.
-5. **The normal form of the goal's expression**, as a code action on a goal
+4. **The normal form of the goal's expression**, as a code action on a goal
    with an expression, with the answer in the output file (`Cmd_compute`).
-6. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+5. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.
 
 The hover cache moved to phase 3, optimisations ([`PHASE3.md`](PHASE3.md)).
