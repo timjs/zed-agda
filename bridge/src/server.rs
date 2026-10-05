@@ -23,6 +23,7 @@ use crate::protocol::{
     DisplayInfo, GiveResult, GoalInfo, HighlightingEntry, InteractionPoint, MakeCaseVariant,
     Response, Solution, message_text,
 };
+use crate::settings::Settings;
 use crate::text::{self, Change};
 use crate::{input, iotcm, location, rename, render};
 
@@ -62,15 +63,12 @@ pub async fn run() {
         .await;
 }
 
+/// What the client said when the bridge started; it does not change.
 struct Config {
-    agda_path: String,
-    extra_args: Vec<String>,
     root: Option<PathBuf>,
     /// Whether the client accepts `LocationLink`s for go to definition, which
     /// carry the range of the name (Zed underlines it on `cmd`-hover).
     link_support: bool,
-    /// How symbols are typed.
-    symbols: input::Options,
 }
 
 #[derive(Default)]
@@ -185,7 +183,9 @@ impl GoalCommand {
 pub struct Bridge {
     pub client: Client,
     config: OnceLock<Config>,
-    output: OnceLock<Output>,
+    /// The user's settings, which may change while the bridge runs.
+    settings: Mutex<Settings>,
+    output: Mutex<Option<Arc<Output>>>,
     documents: Mutex<HashMap<PathBuf, Document>>,
     session: AsyncMutex<Option<Session>>,
 }
@@ -339,7 +339,8 @@ impl Bridge {
         Bridge {
             client,
             config: OnceLock::new(),
-            output: OnceLock::new(),
+            settings: Mutex::new(Settings::default()),
+            output: Mutex::new(None),
             documents: Mutex::new(HashMap::new()),
             session: AsyncMutex::new(None),
         }
@@ -351,6 +352,44 @@ impl Bridge {
 
     pub fn root(&self) -> Option<&Path> {
         self.config.get()?.root.as_deref()
+    }
+
+    fn settings(&self) -> Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    fn output(&self) -> Option<Arc<Output>> {
+        self.output.lock().unwrap().clone()
+    }
+
+    /// Take new settings: report wrong ones, restart Agda at the next
+    /// command when its program or arguments changed, and move the output
+    /// file when its path changed.
+    async fn apply_settings(&self, value: &Value) {
+        let (settings, problems) = Settings::read(value);
+        for problem in problems {
+            self.client
+                .show_message(MessageType::WARNING, format!("agda-bridge: {problem}"))
+                .await;
+        }
+        let before = std::mem::replace(&mut *self.settings.lock().unwrap(), settings.clone());
+        if settings.restarts_agda(&before) {
+            *self.session.lock().await = None;
+            // Agda checks again from scratch, with the new program or flags.
+            for document in self.documents.lock().unwrap().values_mut() {
+                document.loaded_text = None;
+            }
+        }
+        let path = match (&settings.output_file, self.root()) {
+            (Some(file), Some(root)) => root.join(file),
+            (Some(file), None) => PathBuf::from(file),
+            (None, Some(root)) => root.join(".zed").join("agda-output.md"),
+            (None, None) => std::env::temp_dir().join("agda-output.md"),
+        };
+        let mut output = self.output.lock().unwrap();
+        if output.as_ref().is_none_or(|output| output.path != path) {
+            *output = Some(Arc::new(Output::new(path)));
+        }
     }
 
     /// `path` as seen from the worktree. Agda names files by their real
@@ -374,12 +413,10 @@ impl Bridge {
     async fn lock_session(&self) -> Result<MutexGuard<'_, Option<Session>>, String> {
         let mut guard = self.session.lock().await;
         if guard.is_none() {
-            let config = self.config();
-            let agda = Agda::spawn(&config.agda_path, &config.extra_args)
+            let settings = self.settings();
+            let agda = Agda::spawn(&settings.agda_path, &settings.extra_args)
                 .await
-                .map_err(|err| {
-                    format!("{err}. Set `agdaPath` in the agda-bridge initialization options.")
-                })?;
+                .map_err(|err| format!("{err}. Set `lsp.agda-bridge.settings.agdaPath` in Zed."))?;
             *guard = Some(Session {
                 agda,
                 current_file: None,
@@ -449,7 +486,7 @@ impl Bridge {
             .to_string();
         let progress = self.begin_progress(&format!("checking {name}")).await;
         let result = self
-            .run(&mut guard, &iotcm::load(path, &self.config().extra_args))
+            .run(&mut guard, &iotcm::load(path, &self.settings().extra_args))
             .await;
         if let Some(progress) = progress {
             progress.finish().await;
@@ -867,7 +904,7 @@ impl Bridge {
     /// asking again would open it in the pane being edited (see
     /// [`Bridge::open_output`]).
     pub async fn show_output(&self, title: &str, source: &Path, body: &str) {
-        let Some(output) = self.output.get() else {
+        let Some(output) = self.output() else {
             return;
         };
         match output.write(title, Some(source), body).await {
@@ -881,7 +918,7 @@ impl Bridge {
     /// the active pane, unless the user enabled `reveal_if_open`, in which
     /// case an open copy in another pane is revealed instead.
     pub async fn open_output(&self) {
-        let Some(output) = self.output.get() else {
+        let Some(output) = self.output() else {
             return;
         };
         if let Err(err) = output.ensure_exists().await {
@@ -1117,22 +1154,6 @@ impl LanguageServer for Backend {
             .and_then(|folders| folders.first())
             .and_then(|folder| path_of(&folder.uri))
             .or_else(|| params.root_uri.as_ref().and_then(path_of));
-        let agda_path = options["agdaPath"].as_str().unwrap_or("agda").to_string();
-        let extra_args = options["extraArgs"]
-            .as_array()
-            .map(|args| {
-                args.iter()
-                    .filter_map(|arg| arg.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let output_path = match (options["outputFile"].as_str(), &root) {
-            (Some(file), Some(root)) => root.join(file),
-            (Some(file), None) => PathBuf::from(file),
-            (None, Some(root)) => root.join(".zed").join("agda-output.md"),
-            (None, None) => std::env::temp_dir().join("agda-output.md"),
-        };
-        let _ = self.0.output.set(Output::new(output_path));
         let link_support = params
             .capabilities
             .text_document
@@ -1140,20 +1161,8 @@ impl LanguageServer for Backend {
             .and_then(|text_document| text_document.definition.as_ref())
             .and_then(|definition| definition.link_support)
             .unwrap_or(false);
-        let (symbols, problems) = input::Options::from_initialization(&options);
-        for problem in problems {
-            self.0
-                .client
-                .show_message(MessageType::WARNING, format!("agda-bridge: {problem}"))
-                .await;
-        }
-        let _ = self.0.config.set(Config {
-            agda_path,
-            extra_args,
-            root,
-            link_support,
-            symbols,
-        });
+        let _ = self.0.config.set(Config { root, link_support });
+        self.0.apply_settings(&options).await;
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -1182,7 +1191,8 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
-                completion_provider: symbols.enabled().then(|| CompletionOptions {
+                // Always offered, as symbol input can be switched on later.
+                completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(input::trigger_characters()),
                     ..CompletionOptions::default()
                 }),
@@ -1214,6 +1224,10 @@ impl LanguageServer for Backend {
         if let Some(root) = self.0.root() {
             crate::socket::serve(self.0.clone(), root.to_path_buf());
         }
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        self.0.apply_settings(&params.settings).await;
     }
 
     async fn shutdown(&self) -> RpcResult<()> {
@@ -1286,6 +1300,10 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let position = request.position;
+        let symbols = self.0.settings().symbols;
+        if !symbols.enabled() {
+            return Ok(None);
+        }
         let found = {
             let documents = self.0.documents.lock().unwrap();
             let Some(document) = documents.get(&path) else {
@@ -1295,7 +1313,7 @@ impl LanguageServer for Backend {
                 return Ok(None);
             };
             let line = line.strip_suffix('\r').unwrap_or(line);
-            input::complete(line, position.character, &self.0.config().symbols)
+            input::complete(line, position.character, &symbols)
         };
         let Some(found) = found else {
             return Ok(None);

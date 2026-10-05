@@ -214,8 +214,8 @@ offers the symbols as completions (`bridge/src/input.rs`).
 
 ### Options
 
-Three initialization options, read when the bridge starts
-(`input::Options`):
+Three settings (`input::Options`; since then under
+`lsp.agda-bridge.settings`, see "Settings" below):
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -266,7 +266,7 @@ such as `ʱ` are not accents, so the other 130 still cannot be typed.
 | Options: by default both leaders count anywhere, also in `{-#`; with `symbolOnlyAfterWhitespace` neither does after a letter; each mode offers only its leader; `\#` stays `♯`; a Typst name after a `#` in a failed abbreviation | passes; fails when the option is ignored |
 | A space follows the symbol only when asked and not already there | passes |
 | The options are read, and wrong values reported | passes |
-| End to end: `#->` completes; with the options set through `initializationOptions`, `\to` inserts `→ ` and `{-#` gets nothing; with `"none"` there is no completion provider; a wrong `symbolInput` gives a warning | passes |
+| End to end: `#->` completes; with the options set through `initializationOptions`, `\to` inserts `→ ` and `{-#` gets nothing; with `"none"` there is no completion provider (since then: no completions); a wrong `symbolInput` gives a warning | passes |
 
 ### Also fixed: real paths on macOS
 
@@ -282,7 +282,8 @@ targets back into the worktree.
 1. Reinstall the bridge and restart the language server.
 2. Type `#->`, `#acute(e)` and `#macron(diaer(u))`.
 3. Set `"symbolTrailingSpace": true` and `"symbolOnlyAfterWhitespace": true`
-   in `lsp.agda-bridge.initialization_options`, restart the language server,
+   in `lsp.agda-bridge.settings` (at first `initialization_options`, with a
+   restart),
    and type `\to` and a pragma.
 
 ## Done: goal commands
@@ -433,6 +434,48 @@ the definition sites it already keeps for go to definition
 2. On an empty goal, open the code actions: a case split per variable.
 3. Case split a goal with `-- a comment` after it.
 4. Press `F2` on a name used in two open files, and on the `+` of an operator.
+
+## Done: settings under `lsp.agda-bridge.settings`, changing live
+
+The settings were initialization options, an implementation detail. They
+cannot sit directly under `lsp.agda-bridge`: Zed's `LspSettings`
+(`crates/settings_content/src/project.rs`) has fixed fields, `binary`,
+`initialization_options`, `settings`, `enable_lsp_tasks` and `fetch`, and the
+extension API hands an extension only the first three. `settings` is Zed's
+field for a server's own settings, so they moved there.
+
+1. **The extension** (`src/lib.rs`) merges `initialization_options` and
+   `settings` (which wins) and passes the result both as initialization
+   options, so Agda starts with the right program, and as the workspace
+   configuration, which Zed sends with `workspace/didChangeConfiguration`
+   after the start and after every change (`crates/project/src/lsp_store.rs`).
+2. **The bridge** (`bridge/src/settings.rs`) reads them with the same checks
+   for every kind of value, and applies a change at once: a new `agdaPath` or
+   `extraArgs` stops Agda, which starts again at the next load (and every
+   file loads again, as Agda's flags may have changed); a new `outputFile` is
+   used for the next answer; symbol settings for the next completion. The
+   completion provider is therefore always registered, and answers nothing
+   when symbol input is `"none"`.
+3. **Not yet:** a JSON schema, so that Zed completes and checks the settings
+   in `settings.json`. The extension API has
+   `language_server_workspace_configuration_schema` from version 0.8.0, which
+   is not on crates.io yet (the latest is 0.7.0).
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| Settings are read; wrong `agdaPath`, `extraArgs` and `outputFile` keep their defaults and are reported; whether Agda must restart | passes |
+| End to end: `didChangeConfiguration` with `"symbolInput": "none"` stops completions, `"latex"` with a trailing space brings them back, and `"tex"` is reported | passes |
+| End to end: a missing `agdaPath` is reported at the next save, and the right one loads the file again | passes |
+
+### A note on the test fixtures
+
+`bridge/tests/fixtures/Spike.agda` in the working copy had been edited in
+Zed (renaming `suc`, a case split), which made three end-to-end tests wait
+for goals that were no longer there. The tests ran against the committed
+fixtures instead, in a separate worktree; the edited file was left as it was.
+To try things in Zed, a copy outside `tests/fixtures` keeps the tests intact.
 
 ## Next steps
 

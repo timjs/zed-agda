@@ -860,24 +860,34 @@ fn completes_unicode_input() {
     client.notify("exit", Value::Null);
     let _ = client.child.wait();
 
-    // Without symbol input there are no completions at all, and a wrong
-    // value is reported.
+    // Settings change while the bridge runs, as Zed sends them with
+    // `workspace/didChangeConfiguration`: without symbol input there are no
+    // completions, switching it on again brings them back, and a wrong value
+    // is reported.
     let mut client = Client::start(&root.join("bridge.sock"));
-    let init = client.initialize_full(
-        &root,
-        json!({}),
-        json!({ "agdaPath": "agda-bridge-test-no-agda", "symbolInput": "none" }),
+    let init = client.initialize(&root, "agda-bridge-test-no-agda");
+    assert!(!init["capabilities"]["completionProvider"].is_null());
+    let text = "id : A \\to\n".to_string();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": input_uri, "languageId": "agda", "version": 1, "text": text } }),
     );
-    assert!(init["capabilities"]["completionProvider"].is_null());
-    client.request("shutdown", Value::Null);
-    client.notify("exit", Value::Null);
-    let _ = client.child.wait();
-    let mut client = Client::start(&root.join("bridge.sock"));
-    client.initialize_full(
-        &root,
-        json!({}),
-        json!({ "agdaPath": "agda-bridge-test-no-agda", "symbolInput": "tex" }),
+    let configure = |client: &mut Client, settings: Value| {
+        client.notify(
+            "workspace/didChangeConfiguration",
+            json!({ "settings": settings }),
+        );
+    };
+    configure(&mut client, json!({ "symbolInput": "none" }));
+    assert_eq!(complete(&mut client, 0, 10), Value::Null);
+    configure(
+        &mut client,
+        json!({ "symbolInput": "latex", "symbolTrailingSpace": true }),
     );
+    let result = complete(&mut client, 0, 10);
+    assert_eq!(result["items"][0]["textEdit"]["newText"], "→ ");
+    client.received.clear();
+    configure(&mut client, json!({ "symbolInput": "tex" }));
     let message = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
     assert!(
         message["params"]["message"]
@@ -1231,6 +1241,33 @@ fn renames_across_open_files() {
     );
     let renamed = apply_all(&spike_text, edit["changes"][&spike_uri].as_array().unwrap());
     assert!(renamed.contains("λ (x : 𝔹) →"), "{renamed}");
+
+    // A new `agdaPath` restarts Agda at the next load: a missing program is
+    // reported, and the right one works again.
+    let save = |client: &mut Client, uri: &str| {
+        client.notify(
+            "textDocument/didSave",
+            json!({ "textDocument": { "uri": uri } }),
+        );
+    };
+    client.received.clear();
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "agdaPath": "agda-bridge-test-no-agda" } }),
+    );
+    save(&mut client, &nat_uri);
+    client.wait_for("agdaPath", |m| {
+        m["method"] == "window/showMessage"
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("agdaPath"))
+    });
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "agdaPath": agda } }),
+    );
+    save(&mut client, &nat_uri);
+    client.diagnostics(&nat_uri, |d| d.is_empty());
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

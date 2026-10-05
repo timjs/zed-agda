@@ -21,7 +21,7 @@ use unicode_normalization::UnicodeNormalization;
 /// name narrows them down.
 pub const LIMIT: usize = 200;
 
-/// How symbols are typed, from the initialization options.
+/// How symbols are typed, from the settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     /// `\` and Agda's abbreviations, which include LaTeX's names.
@@ -50,7 +50,7 @@ impl Options {
     /// Read `symbolInput` (`"both"`, `"latex"`, `"typst"` or `"none"`),
     /// `symbolTrailingSpace` and `symbolOnlyAfterWhitespace`. Values of the
     /// wrong kind keep their default and are reported.
-    pub fn from_initialization(options: &Value) -> (Options, Vec<String>) {
+    pub fn read(options: &Value) -> (Options, Vec<String>) {
         let mut result = Options::default();
         let mut problems = Vec::new();
         match &options["symbolInput"] {
@@ -644,9 +644,9 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_initialization_options() {
+    fn reads_the_settings() {
         use serde_json::json;
-        let read = |value| Options::from_initialization(&value);
+        let read = |value| Options::read(&value);
         assert_eq!(read(json!({})), (Options::default(), vec![]));
         let (options, problems) = read(json!({
             "symbolInput": "typst",

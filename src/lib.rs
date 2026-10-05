@@ -47,9 +47,32 @@ impl zed::Extension for AgdaExtension {
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<Option<serde_json::Value>> {
-        // Passed through unchanged: `agdaPath`, `extraArgs` and `outputFile`.
-        Ok(LspSettings::for_worktree(BRIDGE, worktree)?.initialization_options)
+        // The settings at startup, so Agda starts with the right program.
+        bridge_settings(worktree).map(Some)
     }
+
+    fn language_server_workspace_configuration(
+        &mut self,
+        _language_server_id: &zed::LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> Result<Option<serde_json::Value>> {
+        // Zed sends these after startup and whenever they change.
+        bridge_settings(worktree).map(Some)
+    }
+}
+
+/// The bridge's settings: `lsp.agda-bridge.settings` in Zed's settings, on top
+/// of `lsp.agda-bridge.initialization_options`, where earlier versions read
+/// them, so both places work.
+fn bridge_settings(worktree: &zed::Worktree) -> Result<serde_json::Value> {
+    let lsp = LspSettings::for_worktree(BRIDGE, worktree)?;
+    let mut merged = serde_json::Map::new();
+    for value in [lsp.initialization_options, lsp.settings].into_iter().flatten() {
+        if let serde_json::Value::Object(object) = value {
+            merged.extend(object);
+        }
+    }
+    Ok(serde_json::Value::Object(merged))
 }
 
 zed::register_extension!(AgdaExtension);

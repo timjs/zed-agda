@@ -28,14 +28,15 @@ page.
 ## Configuration
 
 The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
-`agda` on your `PATH`. Both, and the bridge's other options, are set in Zed's
-`settings.json`:
+`agda` on your `PATH`. Both, and the bridge's other settings, are set in Zed's
+`settings.json`, under `lsp.agda-bridge`: `binary` for the bridge itself and
+`settings` for everything else.
 
 ```json
 "lsp": {
   "agda-bridge": {
     "binary": { "path": "/path/to/agda-bridge" },
-    "initialization_options": {
+    "settings": {
       "agdaPath": "/path/to/agda",
       "outputFile": ".zed/agda-output.md",
       "symbolInput": "both",
@@ -46,7 +47,7 @@ The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
 }
 ```
 
-| Option | Default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
 | `agdaPath` | `"agda"` | the Agda program |
 | `extraArgs` | `[]` | extra command line arguments for Agda, such as `["--safe"]` |
@@ -55,9 +56,15 @@ The extension looks for `agda-bridge` on your `PATH`, and the bridge looks for
 | `symbolTrailingSpace` | `false` | put a space after a completed symbol, unless one is already there |
 | `symbolOnlyAfterWhitespace` | `false` | let `\` and `#` start a symbol only at the start of a line or after whitespace, so that `{-#` and `x\y` never open the menu |
 
-The bridge reads these options when it starts: after a change, run `editor:
-restart language server` from the command palette. A wrong value is reported
-and its default used instead.
+Changes apply at once, without restarting anything: a new `agdaPath` or
+`extraArgs` restarts Agda at the next load, a new `outputFile` is used for the
+next answer. A wrong value is reported and its default used instead.
+
+Zed decides what may go under `lsp.agda-bridge` (`binary`,
+`initialization_options`, `settings` and a few more), so the settings cannot
+sit directly under `agda-bridge`; `settings` is Zed's place for a language
+server's own settings. Settings under `initialization_options`, where earlier
+versions read them, still work; `settings` wins when both have one.
 
 `outputFile` is the Markdown file where Agda's answers appear (the equivalent
 of Emacs's `*Agda information*` buffer), relative to the project root. Add it

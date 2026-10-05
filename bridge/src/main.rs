@@ -17,6 +17,7 @@ mod protocol;
 mod rename;
 mod render;
 mod server;
+mod settings;
 mod socket;
 mod text;
 
