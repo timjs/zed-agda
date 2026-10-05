@@ -532,6 +532,39 @@ file is saved.
 | The with-abstraction: the goal's text as expression, an empty goal, the indentation, a comment, `w` taken so `w₁`, a with-clause; not for part of a right-hand side or a lambda | passes |
 | End to end: the code actions offer `Add with abstraction on n`; after a case split, the with-abstraction on `suc n + m = {!  !}` gives `suc n + m with {!  !}` and `... \| w = {!  !}`, and after saving Agda accepts the file with six goals and no errors | passes |
 
+## Fixed: the outline
+
+The outline (and the breadcrumbs) come from tree-sitter, through
+`languages/agda/outline.scm`, which came with the original extension. Three
+things were wrong in it:
+
+1. **`ℕ Set` under `ℕ`.** There were two patterns for `data` (and for
+   `record`), one with the type and one without. A declaration with a type
+   matched both, so Zed showed two items with the same range, the second
+   nested in the first. Now one pattern per kind has optional parts
+   (`":"? @context (expr)? @context`), which tree-sitter matches once.
+2. **`ff` under `tt`.** The signature pattern matched each name of
+   `tt ff : 𝔹` separately, but both with the whole signature as their range,
+   and Zed nests an item whose range lies inside another's. Now each name is
+   its own item with only the name as its range; Zed takes the text of an
+   item from its captures, wherever they are (`next_outline_item` in
+   `crates/language/src/buffer.rs`), so the type still shows.
+3. **No `:`.** Zed joins the captured pieces with a space, so the `:` token is
+   captured too: `suc : ℕ → ℕ`, `List (A : Set) : Set` (the parameters are new
+   as well). Record fields now show like constructors, and `data Vec A where`,
+   the definition of a declared `data`, appears again (the earlier pattern for
+   `data` without a type missed it when parameters came between).
+
+Checked with a small program that runs the query with the grammar of
+`extension.toml` (tree-sitter-agda `e8d47a6`) and nests the items the way Zed
+does: it reproduced the wrong outline first, then gave the right one for all
+fixtures and a file with every kind of declaration.
+
+**Limitation, in the grammar:** an empty `record … where` without a type gives
+a parse error that takes in the declarations after it, so these show nested
+under the record (also an empty `data … where` right after an empty record).
+That is tree-sitter-agda's, not the query's.
+
 ## Next steps
 
 1. **A hover cache**, so hover stays fast during long loads.
