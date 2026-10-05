@@ -378,12 +378,10 @@ is bound in Zed's vim keymap.
 
 ## Next steps
 
-1. **A hover cache**, so hover stays fast during long loads.
-2. **Goal commands that only show information**: the goal's type together
-   with the type of the expression in it (`Cmd_goal_type_context_infer`), the
-   normal form of an expression (`Cmd_compute`), why a name is in scope, and
-   the type of a helper function.
-3. Stretch goal: hover showing the type of any name in scope at the top
+The hover cache and the goal commands that only show information moved to
+phase 3, optimisations ([`PHASE3.md`](PHASE3.md)). Still open from this phase:
+
+1. Stretch goal: hover showing the type of any name in scope at the top
    level.
-4. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+2. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.

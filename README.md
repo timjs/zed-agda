@@ -11,7 +11,8 @@ An [Agda](https://agda.readthedocs.io/en/latest/getting-started/what-is-agda.htm
 > its own `--interaction-json` protocol, like Emacs `agda2-mode` does. See
 > [`docs/PLAN.md`](docs/PLAN.md) for the design and
 > [`docs/PHASE0.md`](docs/PHASE0.md), [`docs/PHASE1.md`](docs/PHASE1.md) and
-> [`docs/PHASE2.md`](docs/PHASE2.md) for what works so far.
+> [`docs/PHASE2.md`](docs/PHASE2.md) for what works so far, and
+> [`docs/PHASE3.md`](docs/PHASE3.md) for what comes next.
 
 ## Installation
 

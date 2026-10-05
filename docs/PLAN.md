@@ -529,6 +529,10 @@ Why direction 2 still:
 | 3. Commands | direction 2 | `tasks.json`, `agda-bridge client`, socket, keymap snippets (Emacs and vim leader), prompts in the terminal |
 | 4. Distribution | easy install | release CI for the bridge, automatic download in the extension, optional Agda download, version gates 2.6.1 to 2.8, tests ported from agda2-vscode's fixtures plus integration tests against a real Agda |
 
+Since then, phase 3 has become "Optimisations" ([`PHASE3.md`](PHASE3.md)):
+the tasks route was dropped after phase 0, and what phase 3 was for, Agda's
+commands with a typed expression, comes back there as code actions.
+
 ### 9.2 Risks and open questions
 
 | Risk | Mitigation |
