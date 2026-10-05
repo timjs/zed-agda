@@ -1431,7 +1431,18 @@ impl LanguageServer for Backend {
             };
             let offset = text::offset_of(&document.text, position.position);
             let Some(goal) = goals::goal_at(&document.goals, offset) else {
-                return Ok(None);
+                // Not on a goal: how to type the symbol under the cursor.
+                let symbols = self.0.settings().symbols;
+                let Some((start, end, symbol)) = input::symbol_at(&document.text, offset) else {
+                    return Ok(None);
+                };
+                return Ok(input::how_to_type(&symbol, &symbols).map(|markdown| Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: markdown,
+                    }),
+                    range: Some(range_of(&document.text, start, end)),
+                }));
             };
             (goal.id, range_of(&document.text, goal.start, goal.end))
         };
@@ -1591,7 +1602,7 @@ impl LanguageServer for Backend {
         if signature {
             let line = params.range.start.line;
             actions.push(action(
-                "Add clause".into(),
+                "Make clause".into(),
                 COMMAND_ADD_CLAUSE,
                 vec![json!(uri.as_str()), json!(line)],
                 Some(CodeActionKind::REFACTOR_REWRITE),
@@ -1630,7 +1641,7 @@ impl LanguageServer for Backend {
             if *with {
                 let title = match content.is_empty() {
                     true => "With-abstract".to_string(),
-                    false => format!("With-abstract `{content}`"),
+                    false => format!("With-abstract on `{content}`"),
                 };
                 actions.push(goal_action(&title, COMMAND_ADD_WITH));
             }
@@ -1642,7 +1653,7 @@ impl LanguageServer for Backend {
                 vec![json!(uri.as_str())],
                 rewrite.clone(),
             ));
-            actions.push(goal_action("Show goal in output", COMMAND_GOAL));
+            actions.push(goal_action("Print goal in output", COMMAND_GOAL));
         }
         // Offered where output matters, not on every line, so Zed does not
         // show a code action indicator everywhere.

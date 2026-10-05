@@ -97,17 +97,39 @@ diagnostics, hover shows a goal's type and context, and a lone `?` becomes
 
 | Where | Code action | Effect |
 | --- | --- | --- |
-| a type signature | `Add clause` | adds a clause below it, with a name for each argument from its type: `n + m = {!  !}` for `_+_ : ℕ → ℕ → ℕ` (as Idris's "add clause") |
+| a type signature | `Make clause` | adds a clause below it, with a name for each argument from its type: `n + m = {!  !}` for `_+_ : ℕ → ℕ → ℕ` (as Idris's "add clause") |
 | a goal | `Give`, `Refine` | give or refine the goal with its text |
 | an empty goal | ``Case split on `n` `` | one for each variable of the goal's context that can be split |
 | an empty goal | `Case split on result` | introduce the missing patterns, or split on the result |
 | a goal with text | ``Case split on `x y` `` | split on the variables typed in the goal |
-| a goal that is a whole right-hand side | `With-abstract`, ``With-abstract `e` `` | `f n = {! e !}` becomes `f n with e` and `... \| w = {!  !}` (as Idris's "add with") |
+| a goal that is a whole right-hand side | `With-abstract`, ``With-abstract on `e` `` | `f n = {! e !}` becomes `f n with e` and `... \| w = {!  !}` (as Idris's "add with") |
 | a goal | `Auto`, `Solve`, `Solve all goals` | proof search, or the solutions unification already found |
-| a goal or an error | `Show goal in output`, `Open output file` | the output file |
+| a goal or an error | `Print goal in output`, `Open output file` | the output file |
 
-New clauses, from `Add clause`, a case split or `With-abstract`, are loaded
+New clauses, from `Make clause`, a case split or `With-abstract`, are loaded
 when you save the file; until then their goals have no number.
+
+### Moving between goals
+
+Goals are diagnostics of the severity "information" (errors and warnings
+have their own), so Zed's diagnostic jumps can move between goals only. In
+vim or Helix mode, `[ g` and `] g` are free for that; add this to your keymap
+(`zed: open keymap file`):
+
+```json
+[
+  {
+    "context": "Editor && extension == agda && (vim_mode == normal || vim_mode == helix_normal)",
+    "bindings": {
+      "] g": ["editor::GoToDiagnostic", { "severity": "information" }],
+      "[ g": ["editor::GoToPreviousDiagnostic", { "severity": "information" }]
+    }
+  }
+]
+```
+
+Without vim or Helix mode, drop the `vim_mode` part of the context and pick
+other keys.
 
 ## Renaming
 
@@ -152,6 +174,10 @@ Type a leader and a name, and pick the symbol from the completion menu with
 | `#arrow.r`, `#forall`, `#NN`, `#alpha` | `→ ∀ ℕ α` | the names of [Typst's symbols](https://typst.app/docs/reference/symbols/sym/), with modifiers in any order |
 | `#->`, `#=>`, `#<=`, `#!=`, `#[\|` | `→ ⇒ ≤ ≠ ⟦` | Typst's [math shorthands](https://typst.app/docs/reference/symbols/#shorthands) |
 | `#acute(e)`, `#diaer(o)`, `#hat(alpha)` | `é ö α̂` | Typst's [accents](https://typst.app/docs/reference/math/accent/), also nested, as in `#macron(diaer(u))` for `ǖ` |
+
+To find out how to type a symbol you see, hover over it (outside a goal):
+hovering `→` says it is typed with `\to`, `\->` and more, or `#arrow.r` and
+`#->`.
 
 The options `symbolInput`, `symbolTrailingSpace` and `symbolOnlyAfterWhitespace`
 above choose the notations, a space after the symbol, and whether a leader

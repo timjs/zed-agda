@@ -354,6 +354,12 @@ fn drives_agda_through_lsp_and_debug_client() {
         client.hover(&spike_uri, json!({ "line": 0, "character": 0 })),
         ""
     );
+    // Elsewhere, hover on a symbol says how to type it.
+    let hover = client.hover(&spike_uri, position_of(&text, "ℕ", 0));
+    assert!(
+        hover.starts_with("`ℕ` (U+2115) is typed with `\\bN`") && hover.contains("`#NN`"),
+        "{hover}"
+    );
 
     // Go to definition in the same file: `ℕ` in the type of `_+_` leads to
     // `data ℕ` on line 3.
@@ -372,11 +378,11 @@ fn drives_agda_through_lsp_and_debug_client() {
             "Give",
             "Refine",
             "Case split on `suc (n + m)`",
-            "With-abstract `suc (n + m)`",
+            "With-abstract on `suc (n + m)`",
             "Auto",
             "Solve",
             "Solve all goals",
-            "Show goal in output",
+            "Print goal in output",
             "Open output file"
         ]
     );
@@ -1008,11 +1014,11 @@ fn goal_commands() {
             "Give",
             "Refine",
             "Case split on `n`",
-            "With-abstract `n`",
+            "With-abstract on `n`",
             "Auto",
             "Solve",
             "Solve all goals",
-            "Show goal in output",
+            "Print goal in output",
             "Open output file"
         ]
     );
@@ -1149,12 +1155,12 @@ fn goal_commands() {
         "{diagnostics:#?}"
     );
 
-    // On a type signature, `Add clause` adds a clause right below it, with
+    // On a type signature, `Make clause` adds a clause right below it, with
     // names from the types; a constructor gets none.
     let titles = client.code_actions(&goals_uri, json!({ "line": 9, "character": 0 }));
-    assert_eq!(titles, ["Add clause"]);
+    assert_eq!(titles, ["Make clause"]);
     let titles = client.code_actions(&goals_uri, json!({ "line": 3, "character": 2 }));
-    assert!(!titles.iter().any(|t| t == "Add clause"), "{titles:?}");
+    assert!(!titles.iter().any(|t| t == "Make clause"), "{titles:?}");
     let edits = run(&mut client, "agda.addClause", json!([goals_uri, 9]));
     assert_eq!(edits[0]["newText"], "\nn + m = {!  !}");
     assert_eq!(

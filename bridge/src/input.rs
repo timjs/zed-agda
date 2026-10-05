@@ -462,6 +462,132 @@ fn accent_base(inner: &str) -> Option<(String, String)> {
     }
 }
 
+/// The symbol that starts at char `offset` of `text`, with the combining
+/// marks and variation selectors after it, and its char range; `None` for
+/// ASCII and whitespace.
+pub fn symbol_at(text: &str, offset: usize) -> Option<(usize, usize, String)> {
+    let mut chars = text.chars().skip(offset);
+    let first = chars.next()?;
+    if first.is_ascii() || first.is_whitespace() {
+        return None;
+    }
+    let mut symbol = String::from(first);
+    for c in chars {
+        if unicode_normalization::char::is_combining_mark(c)
+            || ('\u{FE00}'..='\u{FE0F}').contains(&c)
+        {
+            symbol.push(c);
+        } else {
+            break;
+        }
+    }
+    let end = offset + symbol.chars().count();
+    Some((offset, end, symbol))
+}
+
+/// How to type `symbol` with the notations that `options` switches on, as
+/// Markdown for a hover; `None` when no notation can.
+pub fn how_to_type(symbol: &str, options: &Options) -> Option<String> {
+    let code = |names: Vec<String>| {
+        names
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut ways = Vec::new();
+    if options.latex {
+        let abbreviations = abbreviations_of(symbol);
+        if !abbreviations.is_empty() {
+            ways.push(code(abbreviations));
+        }
+    }
+    if options.typst {
+        let names = typst_names_of(symbol);
+        if !names.is_empty() {
+            ways.push(format!("in Typst's notation {}", code(names)));
+        }
+    }
+    if ways.is_empty() {
+        return None;
+    }
+    let points: Vec<String> = symbol
+        .chars()
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect();
+    Some(format!(
+        "`{symbol}` ({}) is typed with {}.",
+        points.join(" "),
+        ways.join(", or ")
+    ))
+}
+
+/// At most this many ways of each notation are shown.
+const WAYS: usize = 6;
+
+/// The abbreviations that give `symbol`: those that give it first come
+/// first, then shorter ones.
+fn abbreviations_of(symbol: &str) -> Vec<String> {
+    let mut found: Vec<(usize, &str)> = abbreviation_table()
+        .iter()
+        .filter_map(|(abbreviation, symbols)| {
+            let rank = symbols.iter().position(|s| s == symbol)?;
+            Some((rank, abbreviation.as_str()))
+        })
+        .collect();
+    found.sort_by_key(|(rank, abbreviation)| (*rank != 0, abbreviation.len(), *abbreviation));
+    found
+        .into_iter()
+        .take(WAYS)
+        .map(|(_, abbreviation)| format!("\\{abbreviation}"))
+        .collect()
+}
+
+/// The Typst names, shorthands and accents that give `symbol`.
+fn typst_names_of(symbol: &str) -> Vec<String> {
+    let mut variants: Vec<&Variant> = symbol_table()
+        .iter()
+        .filter(|variant| variant.symbol == symbol)
+        .collect();
+    variants.sort_by_key(|variant| (variant.modifiers.len(), variant.path().len()));
+    let mut found: Vec<String> = variants
+        .into_iter()
+        .take(WAYS)
+        .map(|variant| format!("#{}", variant.path()))
+        .collect();
+    found.extend(
+        SHORTHANDS
+            .iter()
+            .filter(|(_, s)| *s == symbol)
+            .map(|(shorthand, _)| format!("#{shorthand}")),
+    );
+    if found.is_empty()
+        && let Some(accent) = as_accents(symbol)
+    {
+        found.push(format!("#{accent}"));
+    }
+    found
+}
+
+/// `symbol` as Typst accents around a base, as in `macron(diaer(U))` for
+/// `Ǖ`, when it decomposes into a base and accents Typst has.
+fn as_accents(symbol: &str) -> Option<String> {
+    let decomposed: Vec<char> = symbol.nfd().collect();
+    let (base, marks) = decomposed.split_first()?;
+    if marks.is_empty() {
+        return None;
+    }
+    marks.iter().try_fold(base.to_string(), |inner, mark| {
+        // The shortest name, as `diaer` rather than `dot.double`.
+        let name = ACCENTS
+            .iter()
+            .filter(|(_, accent)| accent == mark)
+            .map(|(name, _)| *name)
+            .min_by_key(|name| name.len())?;
+        Some(format!("{name}({inner})"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,5 +822,54 @@ mod tests {
         }
         assert!(triggers.contains(&"\\".to_string()) && triggers.contains(&"#".to_string()));
         assert!(triggers.contains(&".".to_string()));
+    }
+
+    #[test]
+    fn says_how_to_type_a_symbol() {
+        let both = Options::default();
+        let arrow = how_to_type("→", &both).unwrap();
+        // Abbreviations that give it first, the shortest first.
+        assert!(
+            arrow.starts_with("`→` (U+2192) is typed with `\\r`, `\\->`"),
+            "{arrow}"
+        );
+        assert!(
+            arrow.contains("`\\to`") && arrow.contains("`#arrow.r`") && arrow.contains("`#->`")
+        );
+        // Only the notations that are switched on.
+        let latex = Options {
+            typst: false,
+            ..both
+        };
+        assert!(!how_to_type("→", &latex).unwrap().contains('#'));
+        let none = Options {
+            latex: false,
+            typst: false,
+            ..both
+        };
+        assert_eq!(how_to_type("→", &none), None);
+        // An accented letter has no Typst name, but accents.
+        let typst = Options {
+            latex: false,
+            ..both
+        };
+        assert!(how_to_type("é", &typst).unwrap().contains("`#acute(e)`"));
+        assert!(
+            how_to_type("Ǖ", &typst)
+                .unwrap()
+                .contains("`#macron(diaer(U))`")
+        );
+        // A symbol no notation has.
+        assert_eq!(how_to_type("𐀀", &both), None);
+    }
+
+    #[test]
+    fn finds_the_symbol_under_the_cursor() {
+        let text = "f : ℕ → ♀\u{FE0E} x";
+        assert_eq!(symbol_at(text, 4), Some((4, 5, "ℕ".to_string())));
+        assert_eq!(symbol_at(text, 8), Some((8, 10, "♀\u{FE0E}".to_string())));
+        assert_eq!(symbol_at(text, 0), None);
+        assert_eq!(symbol_at(text, 3), None);
+        assert_eq!(symbol_at(text, 99), None);
     }
 }

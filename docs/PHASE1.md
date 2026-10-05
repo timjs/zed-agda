@@ -619,16 +619,56 @@ workarounds (`workspace: save all`, `cmd-alt-s` on macOS, and Zed's
 | Signatures over several lines, in a `where` block, with a comment; one clause per name; not for constructors, fields, postulates, `data` lines, definitions, comments or lambdas | passes |
 | End to end: `Add clause` on the `_+_` signature and not on a constructor; it inserts `n + m = {!  !}` after the signature; the new titles; a space after `\to` by default | passes |
 
+## Done: how to type a symbol, clearer titles, moving between goals
+
+### Hover on a symbol
+
+Outside a goal, hover on a symbol says how to type it, with the notations
+that `symbolInput` switches on, from the same tables as completion, turned
+around (`input::how_to_type`), as agda2-vscode does:
+
+> `→` (U+2192) is typed with `\r`, `\->`, `\r-`, `\to`, `\rightarrow`, or in
+> Typst's notation `#arrow.r`, `#->`.
+
+Abbreviations that give the symbol as their first choice come first, the
+shortest first, at most six of each notation. A letter with accents and no
+Typst name gets its accents (`é` gives `#acute(e)`, `Ǖ` gives
+`#macron(diaer(U))`, from its Unicode decomposition). The symbol is the
+character under the cursor with the combining marks and variation selectors
+after it. On a goal, hover still shows the goal.
+
+### Titles
+
+`Make clause` (was `Add clause`), `Print goal in output` (was `Show goal in
+output`), and ``With-abstract on `e` `` (was ``With-abstract `e` ``).
+
+### Moving between goals
+
+Goals are the only diagnostics of the severity "information", and Zed's
+`editor::GoToDiagnostic` and `editor::GoToPreviousDiagnostic` take a severity
+filter (`GoToDiagnosticSeverityFilter` in
+`crates/project/src/project_settings.rs`, as Zed's own `f8` binding uses), so
+a keymap entry can move between goals only; the README shows one for `[ g`
+and `] g` in vim and Helix mode, limited to Agda files with the
+`extension == agda` key context (`crates/editor/src/editor.rs`). Neither key
+is bound in Zed's vim keymap.
+
+### Proven by tests
+
+| Check | Result |
+| --- | --- |
+| How to type `→` (both notations, the order), only the notations switched on, accents for `é` and `Ǖ`, nothing for a symbol no notation has | passes |
+| The symbol under the cursor, with a variation selector; nothing for ASCII, a space or beyond the text | passes |
+| End to end: hover on `ℕ` outside a goal shows `\bN` and `#NN`; the new titles | passes |
+
 ## Next steps
 
 1. **A hover cache**, so hover stays fast during long loads.
-2. **How to type a symbol**: hover over `→` to see `\to`, `\->` and
-   `#arrow.r`, as agda2-vscode does; the tables are already in the bridge.
-3. **Goal commands that only show information**: the goal's type together
+2. **Goal commands that only show information**: the goal's type together
    with the type of the expression in it (`Cmd_goal_type_context_infer`), the
    normal form of an expression (`Cmd_compute`), why a name is in scope, and
    the type of a helper function.
-4. Stretch goal: hover showing the type of any name in scope at the top
+3. Stretch goal: hover showing the type of any name in scope at the top
    level.
-5. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+4. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.
