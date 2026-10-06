@@ -438,25 +438,62 @@ how to type the symbol; hovering again later shows both.
 | Agda's `InferredType` answer is read; the command is built | passes |
 | End to end: `ℕ : Set` with how to type `ℕ`; `_+_ : ℕ → ℕ → ℕ` from the `+` of `zero + m`; nothing for the bound `m`; `suc : ℕ → ℕ` imported in `Uses.agda` | passes; fails when the operator part is asked as written |
 
+## Done: why a name is in scope
+
+A code action ``Why is `suc` in scope?`` on a name, with Agda's answer in the
+output file. Agda answers (checked with Agda 2.8.0) with
+`{"kind": "WhyInScope", "message": "…"}`, a message such as:
+
+```text
+suc is in scope as
+  * a constructor Nat.ℕ.suc brought into scope by
+    - the opening of Nat at P.agda:3.13-16
+    - its definition at Nat.agda:5.3-6
+```
+
+1. **Where.** On a name Agda highlighted, outside goals, Agda is asked at the
+   top level (`Cmd_why_in_scope_toplevel`); a bound variable is left out
+   there, as Agda says "not in scope" for it. In a goal, the word typed under
+   the cursor (`goals::word_at`, `.` included for a qualified name) is asked in
+   the goal (`Cmd_why_in_scope`), whose scope has the bound variables too:
+   `n is in scope as a variable bound at Spike.agda:9.5-6`. A part of an
+   operator stands for the operator, as in hover.
+2. **Paths** in the answer are made relative to the project, also when Agda
+   writes the real path (`/private/var/…` for `/var/…` on macOS).
+3. **A gap in Agda's answer.** In a file without goals, Agda 2.8 leaves out
+   where an `open` is: the line reads `the opening of Nat at` and ends there.
+   With a goal in the same file it says `at P.agda:3.13-16` (checked with two
+   pairs of files, with and without a goal). The bridge cannot recover the
+   place, so such a line now says `the opening of Nat (Agda gives no location
+   in a file without goals)`.
+4. **The code action indicator.** Every name now has a code action, so Zed
+   shows its indicator whenever the cursor is on a name; `Make clause`
+   (`_+_` on its signature) and the error line of `Bad.agda` (`Set`, defined in
+   `Agda.Primitive`) now offer it too.
+
+| Check | Result |
+| --- | --- |
+| Agda's `WhyInScope` answer is read; both commands are built | passes |
+| The word in a goal: on, in and right after a name, a qualified name, not on the delimiters, between words or outside | passes |
+| A line without the location of an `open` says so | passes |
+| End to end: in a goal, `n` is a variable bound at `Spike.agda:9.5-6`; outside goals, `suc` in `Uses.agda` is a constructor from the opening of `Nat`, defined at `Nat.agda:5.3-6`; the action in the lists of code actions | passes |
+
 ## Next steps
 
 Still to do in this phase:
 
-1. **Why a name is in scope**, as a code action on a name, with Agda's answer
-   (`Cmd_why_in_scope`, or `Cmd_why_in_scope_toplevel` outside a goal) in the
-   output file: where the name was defined or imported from.
-2. **Create a helper function**, as a code action on a goal with an
+1. **Create a helper function**, as a code action on a goal with an
    expression: Agda gives the type of a function that abstracts the goal's
    expression over its free variables (`Cmd_helper_function`); the bridge
    adds that signature, and a clause for it, above the definition the goal is
    in, and calls it in the goal.
-3. **The goal's type with the type of its expression**, as a code action on a
+2. **The goal's type with the type of its expression**, as a code action on a
    goal with an expression, with Agda's answer in the output file
    (`Cmd_goal_type_context_infer`): the goal's type and context, and the type
    of what is typed in it, to compare the two.
-4. **The normal form of the goal's expression**, as a code action on a goal
+3. **The normal form of the goal's expression**, as a code action on a goal
    with an expression, with the answer in the output file (`Cmd_compute`).
-5. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+4. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.
 
 The hover cache moved to phase 3, optimisations ([`PHASE3.md`](PHASE3.md)).

@@ -45,6 +45,20 @@ pub fn goal(id: u32, info: &GoalInfo) -> String {
     }
 }
 
+/// Agda's answer to why a name is in scope, tidied: in a file without goals,
+/// Agda 2.8 leaves out where an `open` is (`the opening of Nat at` and
+/// nothing after it), so such a line says so instead.
+pub fn why_in_scope(message: &str) -> String {
+    message
+        .lines()
+        .map(|line| match line.trim_end().strip_suffix(" at") {
+            Some(start) => format!("{start} (Agda gives no location in a file without goals)"),
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Any `DisplayInfo`, for the output file.
 pub fn display_info(raw: &Value) -> String {
     match DisplayInfo::parse(raw) {
@@ -86,6 +100,7 @@ pub fn display_info(raw: &Value) -> String {
         } => goal(interaction_point.id, &goal_info),
         DisplayInfo::Auto { info } => format!("## Auto\n\n{info}\n"),
         DisplayInfo::InferredType { expr } => format!("```agda\n{expr}\n```\n"),
+        DisplayInfo::WhyInScope { message } => format!("```text\n{message}\n```\n"),
         DisplayInfo::Other => format!(
             "```json\n{}\n```\n",
             serde_json::to_string_pretty(raw).unwrap_or_default()
@@ -104,4 +119,18 @@ fn section(out: &mut String, title: &str, items: impl Iterator<Item = String>) {
         out.push('\n');
     }
     out.push_str("```\n\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn says_when_agda_leaves_out_a_location() {
+        let message = "suc is in scope as\n  * a constructor Nat.ℕ.suc brought into scope by\n    - the opening of Nat at\n    - its definition at Nat.agda:5.3-6";
+        assert_eq!(
+            why_in_scope(message),
+            "suc is in scope as\n  * a constructor Nat.ℕ.suc brought into scope by\n    - the opening of Nat (Agda gives no location in a file without goals)\n    - its definition at Nat.agda:5.3-6"
+        );
+    }
 }

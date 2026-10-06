@@ -189,6 +189,9 @@ pub enum DisplayInfo {
     Auto { info: String },
     /// The type Agda inferred for an expression.
     InferredType { expr: String },
+    /// How a name is in scope: as what, brought in by which `open` or
+    /// definition, with locations.
+    WhyInScope { message: String },
     #[serde(other)]
     Other,
 }
@@ -395,6 +398,16 @@ mod tests {
         assert!(
             matches!(DisplayInfo::parse(&info), DisplayInfo::InferredType { expr } if expr == "ℕ → ℕ")
         );
+
+        let why = r#"{"info":{"filepath":"/x","kind":"WhyInScope","message":"suc is in scope as\n  * a constructor Nat.ℕ.suc brought into scope by\n    - the opening of Nat at /x/P.agda:3.13-16","thing":"suc"},"kind":"DisplayInfo"}"#;
+        let Response::DisplayInfo { info } = parse_line(why).unwrap() else {
+            panic!("expected DisplayInfo");
+        };
+        assert!(matches!(
+            DisplayInfo::parse(&info),
+            DisplayInfo::WhyInScope { message }
+                if message.starts_with("suc is in scope as\n  * a constructor")
+        ));
 
         let auto = r#"{"info":{"info":"No solution found","kind":"Auto"},"kind":"DisplayInfo"}"#;
         let Response::DisplayInfo { info } = parse_line(auto).unwrap() else {

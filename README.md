@@ -107,6 +107,7 @@ on macOS, `ctrl-.` on Linux) are:
 | a goal with text | ``Case split on `x y` `` | split on the variables typed in the goal |
 | a goal that is a whole right-hand side | `With-abstract`, ``With-abstract on `e` `` | `f n = {! e !}` becomes `f n with e` and `... \| w = {!  !}` (as Idris's "add with") |
 | a goal | `Auto`, `Solve`, `Solve all goals` | proof search, or the solutions unification already found |
+| a name, also one typed in a goal | ``Why is `suc` in scope?`` | how the name came into scope (its definition, or the `open` that brought it), with locations, in the output file; in a goal also for its bound variables |
 | a goal or an error | `Print goal in output`, `Open output file` | the output file |
 
 New clauses, from `Make clause`, a case split or `With-abstract`, are loaded

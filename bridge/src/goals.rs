@@ -77,6 +77,22 @@ pub fn adjust(goals: &mut Vec<Goal>, old_text: &str, change: &Change) {
     });
 }
 
+/// The name typed in `goal` at, or right before, the cursor at `offset`:
+/// the characters around it that can be part of a name, `.` included for a
+/// qualified name. `None` outside the goal's text.
+pub fn word_at(text: &str, goal: &Goal, offset: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let (from, to) = goal.interior(&chars)?;
+    let part = |c: char| !c.is_whitespace() && !"(){}\";@".contains(c);
+    let inside = |i: usize| from <= i && i < to;
+    let at = [offset, offset.wrapping_sub(1)]
+        .into_iter()
+        .find(|&i| inside(i) && part(chars[i]))?;
+    let start = (from..=at).rev().take_while(|&i| part(chars[i])).last()?;
+    let end = (at..to).take_while(|&i| part(chars[i])).last()? + 1;
+    Some(chars[start..end].iter().collect())
+}
+
 /// The goal that covers the char at `offset`, for hover.
 pub fn goal_under(goals: &[Goal], offset: usize) -> Option<&Goal> {
     goals
@@ -483,5 +499,31 @@ mod tests {
         assert_eq!(with("f n = suc {! n !}\n"), None);
         assert_eq!(with("f n = {! n !} + 1\n"), None);
         assert_eq!(with("f = λ x → {! x !}\n"), None);
+    }
+
+    #[test]
+    fn finds_the_word_in_a_goal() {
+        let text = "f n = {! suc (N.n + m) !} x";
+        let goal = Goal {
+            id: 0,
+            start: 6,
+            end: 25,
+        };
+        // On, in and right after a name; a qualified name stays whole.
+        assert_eq!(word_at(text, &goal, 9).as_deref(), Some("suc"));
+        assert_eq!(word_at(text, &goal, 10).as_deref(), Some("suc"));
+        assert_eq!(word_at(text, &goal, 12).as_deref(), Some("suc"));
+        assert_eq!(word_at(text, &goal, 14).as_deref(), Some("N.n"));
+        // Not on the delimiters, between words, or outside the goal.
+        assert_eq!(word_at(text, &goal, 6), None);
+        assert_eq!(word_at(text, &goal, 23), None);
+        assert_eq!(word_at(text, &goal, 26), None);
+        // A lone `?` has no text.
+        let lone = Goal {
+            id: 0,
+            start: 4,
+            end: 5,
+        };
+        assert_eq!(word_at("f = ?", &lone, 4), None);
     }
 }

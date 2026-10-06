@@ -36,6 +36,7 @@ pub const COMMAND_SOLVE: &str = "agda.solve";
 pub const COMMAND_SOLVE_ALL: &str = "agda.solveAll";
 pub const COMMAND_ADD_WITH: &str = "agda.addWith";
 pub const COMMAND_ADD_CLAUSE: &str = "agda.addClause";
+pub const COMMAND_WHY_IN_SCOPE: &str = "agda.whyInScope";
 pub const COMMAND_OPEN_OUTPUT: &str = "agda.openOutput";
 
 /// The extensions Agda accepts, as listed in its `InvalidExtensionError`.
@@ -212,6 +213,8 @@ struct Outcome {
     auto: Option<String>,
     /// The type Agda inferred for an expression.
     inferred: Option<String>,
+    /// How a name is in scope.
+    why: Option<String>,
     goal_info: Option<(u32, GoalInfo)>,
     displays: Vec<Value>,
     highlighting: Vec<HighlightingEntry>,
@@ -269,6 +272,7 @@ impl Outcome {
                         } => outcome.goal_info = Some((interaction_point.id, goal_info)),
                         DisplayInfo::Auto { info } => outcome.auto = Some(info),
                         DisplayInfo::InferredType { expr } => outcome.inferred = Some(expr),
+                        DisplayInfo::WhyInScope { message } => outcome.why = Some(message),
                         DisplayInfo::Other => {}
                     }
                     outcome.displays.push(info);
@@ -878,6 +882,53 @@ impl Bridge {
         Ok(format!("Added a with-abstraction on goal ?{id}."))
     }
 
+    /// Explain how `name` is in scope, in the output file: in `goal`, whose
+    /// scope includes its bound variables, or at the top level.
+    pub async fn why_in_scope(
+        &self,
+        path: &Path,
+        goal: Option<u32>,
+        name: &str,
+    ) -> Result<String, String> {
+        let mut guard = self.lock_session().await?;
+        Self::check_current(&guard, path)?;
+        let request = match goal {
+            Some(goal) => iotcm::why_in_scope(path, goal, name),
+            None => iotcm::why_in_scope_toplevel(path, name),
+        };
+        let outcome = Outcome::collect(self.run(&mut guard, &request).await?);
+        drop(guard);
+        let title = format!("Why is `{name}` in scope?");
+        let Some(message) = outcome.why.clone() else {
+            self.show_output(&title, path, &outcome.markdown()).await;
+            return Err(outcome
+                .errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format!("Agda did not say why `{name}` is in scope.")));
+        };
+        let message = render::why_in_scope(&self.relative_paths(&message));
+        self.show_output(&title, path, &format!("```text\n{message}\n```\n"))
+            .await;
+        Ok(message)
+    }
+
+    /// `text` with the paths of files in the worktree made relative to it,
+    /// as Agda writes them in full, and by their real path.
+    fn relative_paths(&self, text: &str) -> String {
+        let Some(root) = self.root() else {
+            return text.to_string();
+        };
+        let mut text = text.to_string();
+        for root in [root.canonicalize().ok(), Some(root.to_path_buf())]
+            .into_iter()
+            .flatten()
+        {
+            text = text.replace(&format!("{}/", root.display()), "");
+        }
+        text
+    }
+
     /// Add a clause for the type signature on `line`, as Idris's "add clause"
     /// does, right after the signature. Agda has no command for it; the
     /// clause comes from the signature's text (see `clause.rs`), and its goal
@@ -1369,6 +1420,7 @@ impl LanguageServer for Backend {
                         COMMAND_SOLVE_ALL.into(),
                         COMMAND_ADD_WITH.into(),
                         COMMAND_ADD_CLAUSE.into(),
+                        COMMAND_WHY_IN_SCOPE.into(),
                         COMMAND_OPEN_OUTPUT.into(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -1686,7 +1738,7 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&uri) else {
             return Ok(None);
         };
-        let (goal, on_problem, signature) = {
+        let (goal, on_problem, signature, scope_name) = {
             let documents = self.0.documents.lock().unwrap();
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
@@ -1702,7 +1754,44 @@ impl LanguageServer for Backend {
                 .iter()
                 .any(|problem| problem.range.start.line <= line && line <= problem.range.end.line);
             let signature = clause::signature_at(&document.text, line as usize).is_some();
-            (goal, on_problem, signature)
+            // The name to explain the scope of: the word typed in a goal,
+            // asked in the goal so its bound variables count, or a name Agda
+            // highlighted elsewhere (not a bound variable, which is not in
+            // scope at the top level), with its definition site to make a
+            // part of an operator whole.
+            let scope_name = match goals::goal_at(&document.goals, offset) {
+                Some(goal) => goals::word_at(&document.text, goal, offset)
+                    .map(|word| (Some(goal.id), word, None)),
+                None => links::link_at(&document.links, offset)
+                    .filter(|link| !link.local)
+                    .map(|link| {
+                        let occurrence: String = document
+                            .text
+                            .chars()
+                            .skip(link.start)
+                            .take(link.end - link.start)
+                            .collect();
+                        (None, occurrence, Some(self.0.definition_site(&path, link)))
+                    }),
+            };
+            (goal, on_problem, signature, scope_name)
+        };
+        // After the lock: the definition site may be read from an open file.
+        let scope_name = scope_name.map(|(goal, name, site)| match site {
+            Some((site_path, site)) => (goal, self.0.expression_for(&name, &site_path, site)),
+            None => (goal, name),
+        });
+        let why_action = |(goal, name): &(Option<u32>, String)| {
+            CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Why is `{name}` in scope?"),
+                kind: None,
+                command: Some(Command {
+                    title: format!("Why is `{name}` in scope?"),
+                    command: COMMAND_WHY_IN_SCOPE.into(),
+                    arguments: Some(vec![json!(uri.as_str()), json!(goal), json!(name)]),
+                }),
+                ..CodeAction::default()
+            })
         };
         let action = |title: String, command: &str, arguments: Vec<Value>, kind| {
             CodeActionOrCommand::CodeAction(CodeAction {
@@ -1773,6 +1862,9 @@ impl LanguageServer for Backend {
             ));
             actions.push(goal_action("Print goal in output", COMMAND_GOAL));
         }
+        if let Some(name) = &scope_name {
+            actions.push(why_action(name));
+        }
         // Offered where output matters, not on every line, so Zed does not
         // show a code action indicator everywhere.
         if goal.is_some() || on_problem {
@@ -1805,8 +1897,11 @@ impl LanguageServer for Backend {
         let Some(path) = uri.as_ref().and_then(path_of) else {
             return Ok(None);
         };
-        // Every command but solve all is about one goal.
-        if id.is_none() && params.command != COMMAND_SOLVE_ALL {
+        // Every command but solve all and why in scope is about one goal.
+        if id.is_none()
+            && params.command != COMMAND_SOLVE_ALL
+            && params.command != COMMAND_WHY_IN_SCOPE
+        {
             return Ok(None);
         }
         // Run in the background, so a long Agda command does not occupy one of
@@ -1815,6 +1910,13 @@ impl LanguageServer for Backend {
         tokio::spawn(async move {
             let result = match (params.command.as_str(), id) {
                 (COMMAND_SOLVE_ALL, _) => bridge.solve(&path, None).await,
+                // The goal, if any, and then the name.
+                (COMMAND_WHY_IN_SCOPE, goal) => {
+                    match params.arguments.get(2).and_then(Value::as_str) {
+                        Some(name) => bridge.why_in_scope(&path, goal, name).await,
+                        None => Err("Why in scope needs a name.".into()),
+                    }
+                }
                 (COMMAND_GIVE, Some(id)) => bridge.give(&path, id, GoalCommand::Give).await,
                 (COMMAND_REFINE, Some(id)) => bridge.give(&path, id, GoalCommand::Refine).await,
                 (COMMAND_AUTO, Some(id)) => bridge.give(&path, id, GoalCommand::Auto).await,
