@@ -402,8 +402,39 @@ suc : ℕ → ℕ
 4. **With a symbol** such as `ℕ`, the type comes first and how to type the
    symbol after it.
 
+**Fixed afterwards: hovers that differed for the same name.** On
+`  succ  : ℕ → ℕ`, one `ℕ` showed its type and how to type it, the other only
+its type, and sometimes the other way around. Two things together:
+
+- The bridge looked at two different characters. For the name it accepted a
+  position right after the name (`link_at`, meant for the cursor, as in go to
+  definition), for the symbol it took the character at the position. Zed asks
+  at the start of the character under the mouse
+  (`index_for_x` in `crates/gpui/src/text_system/line_layout.rs`), but on the
+  space after a name that position is the name's end, and just past the end
+  of a line it is the line's end
+  (`point_for_position` in `crates/editor/src/element.rs`): the type was
+  found, the symbol not.
+- Zed keeps a hover open while the mouse stays in its range, the end
+  included (`same_info_hover` in `crates/editor/src/hover_popover.rs`), so
+  whichever answer came first stayed: coming from the left onto `ℕ` gave
+  both, coming from the right only the type.
+
+Now hover decides on one character (`text::hovered`): the one at the
+position, or, on whitespace or past the end of the line, the one before it,
+which matches Zed's range with its end. The goal, the name and the symbol are
+then looked up for that character only (`goals::goal_under`,
+`links::link_under`). Go to definition and the code actions still accept a
+cursor right after a name.
+
+A smaller difference remains, by design: when Agda is busy, or the file is
+not the one Agda loaded last, the type is not known yet and hover shows only
+how to type the symbol; hovering again later shows both.
+
 | Check | Result |
 | --- | --- |
+| The hovered character: on `ℕ`, on the space after it, past the end of the line; nothing between two spaces | passes |
+| End to end: the same hover, with type and how to type `ℕ`, on the first `ℕ`, the space after it, the last `ℕ` and past the end of the line; only how to type it on `→` | passes; with the old code the space after `ℕ` gave only the type |
 | Agda's `InferredType` answer is read; the command is built | passes |
 | End to end: `ℕ : Set` with how to type `ℕ`; `_+_ : ℕ → ℕ → ℕ` from the `+` of `zero + m`; nothing for the bound `m`; `suc : ℕ → ℕ` imported in `Uses.agda` | passes; fails when the operator part is asked as written |
 

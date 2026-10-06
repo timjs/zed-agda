@@ -362,6 +362,24 @@ fn drives_agda_through_lsp_and_debug_client() {
             && hover.contains("`#NN`"),
         "{hover}"
     );
+    // The same hover wherever Zed asks for one `ℕ` of `  suc  : ℕ → ℕ`: on
+    // it, on the space after it, and just past the end of the line, which
+    // Zed asks at the line's end.
+    let at = |character: u32| json!({ "line": 4, "character": character });
+    let both = client.hover(&spike_uri, at(9));
+    assert!(
+        both.starts_with("```agda\nℕ : Set\n```\n`ℕ` (U+2115) is typed with"),
+        "{both}"
+    );
+    for character in [10, 13, 14] {
+        assert_eq!(client.hover(&spike_uri, at(character)), both, "{character}");
+    }
+    // `→` is no name: only how to type it.
+    assert!(
+        client
+            .hover(&spike_uri, at(11))
+            .starts_with("`→` (U+2192) is typed with")
+    );
     // A part of an operator stands for the whole operator.
     let hover = client.hover(&spike_uri, position_of(&text, "+ m = m", 0));
     assert_eq!(hover, "```agda\n_+_ : ℕ → ℕ → ℕ\n```");

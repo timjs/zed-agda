@@ -86,6 +86,14 @@ pub fn adjust(links: &mut Vec<Link>, change: &Change) {
     });
 }
 
+/// The link that covers the char at `offset`, and only that one: for hover,
+/// whose position is a character (see [`crate::text::hovered`]).
+pub fn link_under(links: &[Link], offset: usize) -> Option<&Link> {
+    links
+        .iter()
+        .find(|link| link.start <= offset && offset < link.end)
+}
+
 /// The link at `offset`, also when the cursor sits right after a name.
 pub fn link_at(links: &[Link], offset: usize) -> Option<&Link> {
     links

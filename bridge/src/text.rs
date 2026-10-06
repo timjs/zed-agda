@@ -193,6 +193,23 @@ pub fn single_change(old: &str, new: &str) -> Option<Change> {
     })
 }
 
+/// The char that a hover at `offset` is about. Zed asks at the start of the
+/// character under the mouse, but also at the end of a line when the mouse is
+/// just past it, and it keeps a hover open while the mouse stays in the
+/// hovered range including its end. So the character at `offset` counts,
+/// unless it is whitespace or there is none: then the one before it, so that
+/// the end of a name gives the same hover as the name.
+pub fn hovered(text: &str, offset: usize) -> Option<usize> {
+    let mut chars = text.chars().skip(offset.saturating_sub(1));
+    let before = if offset > 0 { chars.next() } else { None };
+    let at = chars.next();
+    match (before, at) {
+        (_, Some(c)) if !c.is_whitespace() => Some(offset),
+        (Some(c), _) if !c.is_whitespace() => Some(offset - 1),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +301,20 @@ mod tests {
         assert_eq!(index.next_line_start(2), TEXT.chars().count());
         assert_eq!(index.line_end(0), 2);
         assert_eq!(index.line_end(2), TEXT.chars().count());
+    }
+
+    #[test]
+    fn finds_the_hovered_char() {
+        let text = "  suc  : ℕ → ℕ\nx";
+        // On `ℕ`, on the space after it, and just past the end of the line.
+        assert_eq!(hovered(text, 9), Some(9));
+        assert_eq!(hovered(text, 10), Some(9));
+        assert_eq!(hovered(text, 13), Some(13));
+        assert_eq!(hovered(text, 14), Some(13));
+        // Between two spaces, at the start, and beyond the text.
+        assert_eq!(hovered(text, 6), None);
+        assert_eq!(hovered(text, 0), None);
+        assert_eq!(hovered("ab", 2), Some(1));
+        assert_eq!(hovered("ab", 9), None);
     }
 }

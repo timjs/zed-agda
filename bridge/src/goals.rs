@@ -77,6 +77,13 @@ pub fn adjust(goals: &mut Vec<Goal>, old_text: &str, change: &Change) {
     });
 }
 
+/// The goal that covers the char at `offset`, for hover.
+pub fn goal_under(goals: &[Goal], offset: usize) -> Option<&Goal> {
+    goals
+        .iter()
+        .find(|goal| goal.start <= offset && offset < goal.end)
+}
+
 /// Find goal by offset.
 pub fn goal_at(goals: &[Goal], offset: usize) -> Option<&Goal> {
     goals.iter().find(|goal| goal.contains(offset))

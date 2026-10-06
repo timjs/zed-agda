@@ -1527,8 +1527,12 @@ impl LanguageServer for Backend {
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
             };
+            // Goal, name and symbol all for the same hovered char.
             let offset = text::offset_of(&document.text, position.position);
-            match goals::goal_at(&document.goals, offset) {
+            let Some(offset) = text::hovered(&document.text, offset) else {
+                return Ok(None);
+            };
+            match goals::goal_under(&document.goals, offset) {
                 Some(goal) => Ok((goal.id, range_of(&document.text, goal.start, goal.end))),
                 None => {
                     let symbols = self.0.settings().symbols;
@@ -1538,7 +1542,7 @@ impl LanguageServer for Backend {
                             Some((range_of(&document.text, start, end), markdown))
                         },
                     );
-                    let name = links::link_at(&document.links, offset)
+                    let name = links::link_under(&document.links, offset)
                         .filter(|link| !link.local)
                         .map(|link| {
                             let occurrence: String = document
