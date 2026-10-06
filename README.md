@@ -94,8 +94,10 @@ seen yet (lines typed since the last save); `full` shows only Agda's.
 
 Opening or saving a file loads it in Agda. Goals then show their types as
 diagnostics, and a lone `?` becomes `{!  !}`. Hover shows a goal's type and
-context, and elsewhere the type of a name that is in scope at the top level
-(as `suc : ℕ → ℕ`), in the file Agda loaded last. The code actions (`cmd-.`
+context. Elsewhere, on a name that is in scope at the top level, in the file
+Agda loaded last, it shows the name's type (as `suc : ℕ → ℕ`), how to type
+it when it is a symbol, and why it is in scope: its definition, or the `open`
+that brought it in, with locations. The code actions (`cmd-.`
 on macOS, `ctrl-.` on Linux) are:
 
 | Where | Code action | Effect |
@@ -107,7 +109,6 @@ on macOS, `ctrl-.` on Linux) are:
 | a goal with text | ``Case split on `x y` `` | split on the variables typed in the goal |
 | a goal that is a whole right-hand side | `With-abstract`, ``With-abstract on `e` `` | `f n = {! e !}` becomes `f n with e` and `... \| w = {!  !}` (as Idris's "add with") |
 | a goal | `Auto`, `Solve`, `Solve all goals` | proof search, or the solutions unification already found |
-| a name, also one typed in a goal | ``Why is `suc` in scope?`` | how the name came into scope (its definition, or the `open` that brought it), with locations, in the output file; in a goal also for its bound variables |
 | a goal or an error | `Print goal in output`, `Open output file` | the output file |
 
 New clauses, from `Make clause`, a case split or `With-abstract`, are loaded

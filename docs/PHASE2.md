@@ -438,11 +438,15 @@ how to type the symbol; hovering again later shows both.
 | Agda's `InferredType` answer is read; the command is built | passes |
 | End to end: `ℕ : Set` with how to type `ℕ`; `_+_ : ℕ → ℕ → ℕ` from the `+` of `zero + m`; nothing for the bound `m`; `suc : ℕ → ℕ` imported in `Uses.agda` | passes; fails when the operator part is asked as written |
 
-## Done: why a name is in scope
+## Done: why a name is in scope, in hover
 
-A code action ``Why is `suc` in scope?`` on a name, with Agda's answer in the
-output file. Agda answers (checked with Agda 2.8.0) with
-`{"kind": "WhyInScope", "message": "…"}`, a message such as:
+Hover outside goals shows, in this order, the type of the name, how to type
+it when it is a symbol, and why it is in scope:
+
+````markdown
+```agda
+suc : ℕ → ℕ
+```
 
 ```text
 suc is in scope as
@@ -450,33 +454,36 @@ suc is in scope as
     - the opening of Nat at P.agda:3.13-16
     - its definition at Nat.agda:5.3-6
 ```
+````
 
-1. **Where.** On a name Agda highlighted, outside goals, Agda is asked at the
-   top level (`Cmd_why_in_scope_toplevel`); a bound variable is left out
-   there, as Agda says "not in scope" for it. In a goal, the word typed under
-   the cursor (`goals::word_at`, `.` included for a qualified name) is asked in
-   the goal (`Cmd_why_in_scope`), whose scope has the bound variables too:
-   `n is in scope as a variable bound at Spike.agda:9.5-6`. A part of an
-   operator stands for the operator, as in hover.
+1. **Agda's answer.** `Cmd_why_in_scope_toplevel "<name>"` answers (checked
+   with Agda 2.8.0) with `{"kind": "WhyInScope", "message": "…"}`. The bridge
+   asks it right after the type, in the same turn with Agda, only when the
+   name has a type (a name without one is not in scope at the top level), and
+   keeps both answers per file until its next load, so it costs nothing
+   more on a second hover.
 2. **Paths** in the answer are made relative to the project, also when Agda
    writes the real path (`/private/var/…` for `/var/…` on macOS).
 3. **A gap in Agda's answer.** In a file without goals, Agda 2.8 leaves out
    where an `open` is: the line reads `the opening of Nat at` and ends there.
    With a goal in the same file it says `at P.agda:3.13-16` (checked with two
    pairs of files, with and without a goal). The bridge cannot recover the
-   place, so such a line now says `the opening of Nat (Agda gives no location
-   in a file without goals)`.
-4. **The code action indicator.** Every name now has a code action, so Zed
-   shows its indicator whenever the cursor is on a name; `Make clause`
-   (`_+_` on its signature) and the error line of `Bad.agda` (`Set`, defined in
-   `Agda.Primitive`) now offer it too.
+   place, so such a line says `the opening of Nat (Agda gives no location in a
+   file without goals)`.
+4. **First a code action.** It started as a code action, ``Why is `suc` in
+   scope?``, with the answer in the output file; that one also worked in a
+   goal, for the word under the cursor, bound variables included
+   (`Cmd_why_in_scope`). In hover that cannot work well: the hover of a goal
+   covers the whole goal, and Zed keeps it open while the mouse moves inside
+   it, so it would keep showing the first word's answer. So in a goal, hover
+   shows the goal as before, and why a bound variable is in scope is no
+   longer shown.
 
 | Check | Result |
 | --- | --- |
-| Agda's `WhyInScope` answer is read; both commands are built | passes |
-| The word in a goal: on, in and right after a name, a qualified name, not on the delimiters, between words or outside | passes |
+| Agda's `WhyInScope` answer is read; the command is built | passes |
 | A line without the location of an `open` says so | passes |
-| End to end: in a goal, `n` is a variable bound at `Spike.agda:9.5-6`; outside goals, `suc` in `Uses.agda` is a constructor from the opening of `Nat`, defined at `Nat.agda:5.3-6`; the action in the lists of code actions | passes |
+| End to end: `ℕ` shows its type, how to type it and that it is defined at `Spike.agda:3.6-7`, in that order; `_+_` from its `+`, with a relative path; `suc` in `Uses.agda` came in with the opening of `Nat` and is defined at `Nat.agda:5.3-6`; no code action for it any more | passes |
 
 ## Next steps
 

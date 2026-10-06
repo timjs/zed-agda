@@ -138,15 +138,6 @@ pub fn why_in_scope_toplevel(file: &Path, name: &str) -> String {
     )
 }
 
-/// `Cmd_why_in_scope <goal> noRange "<name>"`: how a name is in scope in a
-/// goal, its bound variables included.
-pub fn why_in_scope(file: &Path, goal: u32, name: &str) -> String {
-    iotcm(
-        file,
-        &format!("Cmd_why_in_scope {goal} noRange {}", haskell_quote(name)),
-    )
-}
-
 /// `Cmd_solveAll AsIs`: the solutions of all goals that unification already
 /// found.
 pub fn solve_all(file: &Path) -> String {
@@ -205,10 +196,6 @@ mod tests {
         assert_eq!(
             why_in_scope_toplevel(file, "suc"),
             envelope(r#"Cmd_why_in_scope_toplevel "suc""#)
-        );
-        assert_eq!(
-            why_in_scope(file, 0, "n"),
-            envelope(r#"Cmd_why_in_scope 0 noRange "n""#)
         );
         assert_eq!(
             infer_toplevel(file, "_+_"),

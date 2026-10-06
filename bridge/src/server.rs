@@ -36,7 +36,6 @@ pub const COMMAND_SOLVE: &str = "agda.solve";
 pub const COMMAND_SOLVE_ALL: &str = "agda.solveAll";
 pub const COMMAND_ADD_WITH: &str = "agda.addWith";
 pub const COMMAND_ADD_CLAUSE: &str = "agda.addClause";
-pub const COMMAND_WHY_IN_SCOPE: &str = "agda.whyInScope";
 pub const COMMAND_OPEN_OUTPUT: &str = "agda.openOutput";
 
 /// The extensions Agda accepts, as listed in its `InvalidExtensionError`.
@@ -74,6 +73,16 @@ struct Config {
     link_support: bool,
 }
 
+/// What hover shows about a name, from Agda.
+#[derive(Clone, Default)]
+struct NameInfo {
+    /// Its type; `None` for a name not in scope at the top level, such as one
+    /// from a `where` block.
+    ty: Option<String>,
+    /// How it is in scope, as Agda explains it, with relative paths.
+    scope: Option<String>,
+}
+
 #[derive(Default)]
 struct Document {
     text: String,
@@ -90,9 +99,8 @@ struct Document {
     loaded_text: Option<String>,
     /// The variables a goal's context offers for a case split, once known.
     split_variables: HashMap<u32, Vec<String>>,
-    /// The types of names hovered since the last load; `None` when Agda had
-    /// none, as for a name that is not in scope at the top level.
-    name_types: HashMap<String, Option<String>>,
+    /// What Agda said about names hovered since the last load.
+    names: HashMap<String, NameInfo>,
     /// When Agda last checked this text, to tell whether links into another
     /// file are older than that file's last check.
     loaded_at: Option<std::time::Instant>,
@@ -571,7 +579,7 @@ impl Bridge {
             document.loaded_text = Some(snapshot);
             document.loaded_at = Some(std::time::Instant::now());
             document.split_variables.clear();
-            document.name_types.clear();
+            document.names.clear();
             if opened {
                 document.expand_question_marks()
             } else {
@@ -622,33 +630,44 @@ impl Bridge {
         }
     }
 
-    /// The type of the expression `name` in the scope at the top level of
-    /// `path`, for hover: from the cache, or asked from Agda when it is not
-    /// busy and `path` is its current file.
-    async fn name_type(&self, path: &Path, name: &str) -> Option<String> {
+    /// The type of `name` in the scope at the top level of `path`, and why it
+    /// is in scope, for hover: from the cache, or asked from Agda when it is
+    /// not busy and `path` is its current file; `None` when it was not asked.
+    async fn name_info(&self, path: &Path, name: &str) -> Option<NameInfo> {
         if let Some(known) = self
             .documents
             .lock()
             .unwrap()
             .get(path)
-            .and_then(|document| document.name_types.get(name).cloned())
+            .and_then(|document| document.names.get(name).cloned())
         {
-            return known;
+            return Some(known);
         }
         let mut guard = self.session.try_lock().ok()?;
         Self::check_current(&guard, path).ok()?;
-        let responses = self
-            .run(&mut guard, &iotcm::infer_toplevel(path, name))
-            .await
-            .ok()?;
+        let ty = Outcome::collect(
+            self.run(&mut guard, &iotcm::infer_toplevel(path, name))
+                .await
+                .ok()?,
+        )
+        .inferred;
+        // A name without a type is not in scope: nothing to explain.
+        let scope = match ty {
+            Some(_) => Outcome::collect(
+                self.run(&mut guard, &iotcm::why_in_scope_toplevel(path, name))
+                    .await
+                    .ok()?,
+            )
+            .why
+            .map(|message| render::why_in_scope(&self.relative_paths(&message))),
+            None => None,
+        };
         drop(guard);
-        let inferred = Outcome::collect(responses).inferred;
+        let info = NameInfo { ty, scope };
         if let Some(document) = self.documents.lock().unwrap().get_mut(path) {
-            document
-                .name_types
-                .insert(name.to_string(), inferred.clone());
+            document.names.insert(name.to_string(), info.clone());
         }
-        inferred
+        Some(info)
     }
 
     /// The variables of goal `id` to offer for a case split: from the cache,
@@ -882,37 +901,6 @@ impl Bridge {
         Ok(format!("Added a with-abstraction on goal ?{id}."))
     }
 
-    /// Explain how `name` is in scope, in the output file: in `goal`, whose
-    /// scope includes its bound variables, or at the top level.
-    pub async fn why_in_scope(
-        &self,
-        path: &Path,
-        goal: Option<u32>,
-        name: &str,
-    ) -> Result<String, String> {
-        let mut guard = self.lock_session().await?;
-        Self::check_current(&guard, path)?;
-        let request = match goal {
-            Some(goal) => iotcm::why_in_scope(path, goal, name),
-            None => iotcm::why_in_scope_toplevel(path, name),
-        };
-        let outcome = Outcome::collect(self.run(&mut guard, &request).await?);
-        drop(guard);
-        let title = format!("Why is `{name}` in scope?");
-        let Some(message) = outcome.why.clone() else {
-            self.show_output(&title, path, &outcome.markdown()).await;
-            return Err(outcome
-                .errors
-                .first()
-                .cloned()
-                .unwrap_or_else(|| format!("Agda did not say why `{name}` is in scope.")));
-        };
-        let message = render::why_in_scope(&self.relative_paths(&message));
-        self.show_output(&title, path, &format!("```text\n{message}\n```\n"))
-            .await;
-        Ok(message)
-    }
-
     /// `text` with the paths of files in the worktree made relative to it,
     /// as Agda writes them in full, and by their real path.
     fn relative_paths(&self, text: &str) -> String {
@@ -1120,35 +1108,47 @@ impl Bridge {
         }
     }
 
-    /// Hover outside goals: the type of the name under the cursor, given as
-    /// its range, its text and its definition site, and how to type the
-    /// symbol under it, given as its range and the Markdown.
+    /// Hover outside goals, in this order: the type of the name under the
+    /// cursor (given as its range, its text and its definition site), how to
+    /// type the symbol under it (given as its range and the Markdown), and
+    /// why the name is in scope.
     async fn hover_outside_goals(
         &self,
         path: &Path,
         name: Option<(Range, String, (PathBuf, usize))>,
         typing: Option<(Range, String)>,
     ) -> Option<Hover> {
-        let typed = match name {
-            Some((range, occurrence, (site_path, site))) => {
-                let expression = self.expression_for(&occurrence, &site_path, site);
-                self.name_type(path, &expression)
-                    .await
-                    .map(|ty| (range, format!("```agda\n{expression} : {ty}\n```")))
+        let mut parts = Vec::new();
+        let mut range = None;
+        let mut scope = None;
+        if let Some((name_range, occurrence, (site_path, site))) = name {
+            let expression = self.expression_for(&occurrence, &site_path, site);
+            if let Some(NameInfo {
+                ty: Some(ty),
+                scope: why,
+            }) = self.name_info(path, &expression).await
+            {
+                parts.push(format!("```agda\n{expression} : {ty}\n```"));
+                range = Some(name_range);
+                scope = why;
             }
-            None => None,
-        };
-        let (range, value) = match (typed, typing) {
-            (Some((range, ty)), Some((_, how))) => (range, format!("{ty}\n{how}")),
-            (Some(found), None) | (None, Some(found)) => found,
-            (None, None) => return None,
-        };
+        }
+        if let Some((symbol_range, how)) = typing {
+            parts.push(how);
+            range = range.or(Some(symbol_range));
+        }
+        if let Some(why) = scope {
+            parts.push(format!("```text\n{why}\n```"));
+        }
+        if parts.is_empty() {
+            return None;
+        }
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value,
+                value: parts.join("\n\n"),
             }),
-            range: Some(range),
+            range,
         })
     }
 
@@ -1420,7 +1420,6 @@ impl LanguageServer for Backend {
                         COMMAND_SOLVE_ALL.into(),
                         COMMAND_ADD_WITH.into(),
                         COMMAND_ADD_CLAUSE.into(),
-                        COMMAND_WHY_IN_SCOPE.into(),
                         COMMAND_OPEN_OUTPUT.into(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -1738,7 +1737,7 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&uri) else {
             return Ok(None);
         };
-        let (goal, on_problem, signature, scope_name) = {
+        let (goal, on_problem, signature) = {
             let documents = self.0.documents.lock().unwrap();
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
@@ -1754,44 +1753,7 @@ impl LanguageServer for Backend {
                 .iter()
                 .any(|problem| problem.range.start.line <= line && line <= problem.range.end.line);
             let signature = clause::signature_at(&document.text, line as usize).is_some();
-            // The name to explain the scope of: the word typed in a goal,
-            // asked in the goal so its bound variables count, or a name Agda
-            // highlighted elsewhere (not a bound variable, which is not in
-            // scope at the top level), with its definition site to make a
-            // part of an operator whole.
-            let scope_name = match goals::goal_at(&document.goals, offset) {
-                Some(goal) => goals::word_at(&document.text, goal, offset)
-                    .map(|word| (Some(goal.id), word, None)),
-                None => links::link_at(&document.links, offset)
-                    .filter(|link| !link.local)
-                    .map(|link| {
-                        let occurrence: String = document
-                            .text
-                            .chars()
-                            .skip(link.start)
-                            .take(link.end - link.start)
-                            .collect();
-                        (None, occurrence, Some(self.0.definition_site(&path, link)))
-                    }),
-            };
-            (goal, on_problem, signature, scope_name)
-        };
-        // After the lock: the definition site may be read from an open file.
-        let scope_name = scope_name.map(|(goal, name, site)| match site {
-            Some((site_path, site)) => (goal, self.0.expression_for(&name, &site_path, site)),
-            None => (goal, name),
-        });
-        let why_action = |(goal, name): &(Option<u32>, String)| {
-            CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("Why is `{name}` in scope?"),
-                kind: None,
-                command: Some(Command {
-                    title: format!("Why is `{name}` in scope?"),
-                    command: COMMAND_WHY_IN_SCOPE.into(),
-                    arguments: Some(vec![json!(uri.as_str()), json!(goal), json!(name)]),
-                }),
-                ..CodeAction::default()
-            })
+            (goal, on_problem, signature)
         };
         let action = |title: String, command: &str, arguments: Vec<Value>, kind| {
             CodeActionOrCommand::CodeAction(CodeAction {
@@ -1862,9 +1824,6 @@ impl LanguageServer for Backend {
             ));
             actions.push(goal_action("Print goal in output", COMMAND_GOAL));
         }
-        if let Some(name) = &scope_name {
-            actions.push(why_action(name));
-        }
         // Offered where output matters, not on every line, so Zed does not
         // show a code action indicator everywhere.
         if goal.is_some() || on_problem {
@@ -1897,11 +1856,8 @@ impl LanguageServer for Backend {
         let Some(path) = uri.as_ref().and_then(path_of) else {
             return Ok(None);
         };
-        // Every command but solve all and why in scope is about one goal.
-        if id.is_none()
-            && params.command != COMMAND_SOLVE_ALL
-            && params.command != COMMAND_WHY_IN_SCOPE
-        {
+        // Every command but solve all is about one goal.
+        if id.is_none() && params.command != COMMAND_SOLVE_ALL {
             return Ok(None);
         }
         // Run in the background, so a long Agda command does not occupy one of
@@ -1910,13 +1866,6 @@ impl LanguageServer for Backend {
         tokio::spawn(async move {
             let result = match (params.command.as_str(), id) {
                 (COMMAND_SOLVE_ALL, _) => bridge.solve(&path, None).await,
-                // The goal, if any, and then the name.
-                (COMMAND_WHY_IN_SCOPE, goal) => {
-                    match params.arguments.get(2).and_then(Value::as_str) {
-                        Some(name) => bridge.why_in_scope(&path, goal, name).await,
-                        None => Err("Why in scope needs a name.".into()),
-                    }
-                }
                 (COMMAND_GIVE, Some(id)) => bridge.give(&path, id, GoalCommand::Give).await,
                 (COMMAND_REFINE, Some(id)) => bridge.give(&path, id, GoalCommand::Refine).await,
                 (COMMAND_AUTO, Some(id)) => bridge.give(&path, id, GoalCommand::Auto).await,

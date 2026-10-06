@@ -354,12 +354,15 @@ fn drives_agda_through_lsp_and_debug_client() {
         client.hover(&spike_uri, json!({ "line": 0, "character": 0 })),
         ""
     );
-    // Elsewhere, hover on a name shows its type, and on a symbol how to
-    // type it; both for `ℕ`.
+    // Elsewhere, hover on a name shows its type, on a symbol how to type
+    // it, and then why the name is in scope; all three for `ℕ`.
     let hover = client.hover(&spike_uri, position_of(&text, "ℕ", 0));
     assert!(
-        hover.starts_with("```agda\nℕ : Set\n```\n`ℕ` (U+2115) is typed with `\\bN`")
-            && hover.contains("`#NN`"),
+        hover.starts_with("```agda\nℕ : Set\n```\n\n`ℕ` (U+2115) is typed with `\\bN`")
+            && hover.contains("`#NN`")
+            && hover.contains(
+                "\n\n```text\nℕ is in scope as\n  * a data type Spike.ℕ brought into scope by\n    - its definition at Spike.agda:3.6-7"
+            ),
         "{hover}"
     );
     // The same hover wherever Zed asks for one `ℕ` of `  suc  : ℕ → ℕ`: on
@@ -368,7 +371,7 @@ fn drives_agda_through_lsp_and_debug_client() {
     let at = |character: u32| json!({ "line": 4, "character": character });
     let both = client.hover(&spike_uri, at(9));
     assert!(
-        both.starts_with("```agda\nℕ : Set\n```\n`ℕ` (U+2115) is typed with"),
+        both.starts_with("```agda\nℕ : Set\n```\n\n`ℕ` (U+2115) is typed with"),
         "{both}"
     );
     for character in [10, 13, 14] {
@@ -380,9 +383,13 @@ fn drives_agda_through_lsp_and_debug_client() {
             .hover(&spike_uri, at(11))
             .starts_with("`→` (U+2192) is typed with")
     );
-    // A part of an operator stands for the whole operator.
+    // A part of an operator stands for the whole operator; the path in why
+    // it is in scope is relative to the project.
     let hover = client.hover(&spike_uri, position_of(&text, "+ m = m", 0));
-    assert_eq!(hover, "```agda\n_+_ : ℕ → ℕ → ℕ\n```");
+    assert_eq!(
+        hover,
+        "```agda\n_+_ : ℕ → ℕ → ℕ\n```\n\n```text\n_+_ is in scope as\n  * a defined name Spike._+_ brought into scope by\n    - its definition at Spike.agda:7.1-4\n```"
+    );
     // A bound variable is not in scope at the top level: nothing to show.
     assert_eq!(client.hover(&spike_uri, position_of(&text, "m = m", 0)), "");
 
@@ -394,8 +401,8 @@ fn drives_agda_through_lsp_and_debug_client() {
     );
 
     // Code actions on a filled hole offer the goal commands, showing the
-    // goal, why the name under the cursor is in scope and the output file;
-    // a line without goals, names or problems offers nothing.
+    // goal and the output file; a line without goals or problems offers
+    // nothing.
     let titles = client.code_actions(&spike_uri, position_of(&text, "suc (n", 0));
     assert_eq!(
         titles,
@@ -408,26 +415,11 @@ fn drives_agda_through_lsp_and_debug_client() {
             "Solve",
             "Solve all goals",
             "Print goal in output",
-            "Why is `suc` in scope?",
             "Open output file"
         ]
     );
     let titles = client.code_actions(&spike_uri, json!({ "line": 0, "character": 0 }));
     assert!(titles.is_empty(), "{titles:?}");
-
-    // Why a name typed in a goal is in scope, asked in the goal, so that a
-    // bound variable counts; the answer goes to the output file, with paths
-    // relative to the project.
-    client.request(
-        "workspace/executeCommand",
-        json!({ "command": "agda.whyInScope", "arguments": [spike_uri, 0, "n"] }),
-    );
-    let why = wait_for_output(&output, "n is in scope as");
-    assert!(
-        why.contains("# Why is `n` in scope?")
-            && why.contains("a variable bound at Spike.agda:9.5-6"),
-        "{why}"
-    );
 
     // Give goes through executeCommand and comes back as workspace/applyEdit.
     client.received.clear();
@@ -572,8 +564,7 @@ fn drives_agda_through_lsp_and_debug_client() {
 
     // On an error line, the output file can be reopened.
     let titles = client.code_actions(&bad_uri, json!({ "line": 6, "character": 4 }));
-    // (`Set` is a name too, defined in `Agda.Primitive`.)
-    assert_eq!(titles, ["Why is `Set` in scope?", "Open output file"]);
+    assert_eq!(titles, ["Open output file"]);
     client.received.clear();
     client.request(
         "workspace/executeCommand",
@@ -610,26 +601,12 @@ fn drives_agda_through_lsp_and_debug_client() {
         client.definition(&uses_uri, position_of(&uses_text, "open", 0)),
         Value::Null
     );
-    // Hover shows the type of a name from the imported module.
+    // Hover shows the type of a name from the imported module, and that the
+    // `open import` brought it in. `Uses.agda` has no goals, and then Agda
+    // 2.8 does not say where that `open` is.
     assert_eq!(
         client.hover(&uses_uri, position_of(&uses_text, "suc", 0)),
-        "```agda\nsuc : ℕ → ℕ\n```"
-    );
-    // Outside goals, why a name is in scope is asked at the top level: `suc`
-    // came in with the `open import`. `Uses.agda` has no goals, and then Agda
-    // 2.8 does not say where that `open` is.
-    let titles = client.code_actions(&uses_uri, position_of(&uses_text, "suc", 0));
-    assert_eq!(titles, ["Why is `suc` in scope?"]);
-    client.request(
-        "workspace/executeCommand",
-        json!({ "command": "agda.whyInScope", "arguments": [uses_uri, null, "suc"] }),
-    );
-    let why = wait_for_output(&output, "suc is in scope as");
-    assert!(
-        why.contains("a constructor Nat.ℕ.suc")
-            && why.contains("the opening of Nat (Agda gives no location in a file without goals)")
-            && why.contains("its definition at Nat.agda:5.3-6"),
-        "{why}"
+        "```agda\nsuc : ℕ → ℕ\n```\n\n```text\nsuc is in scope as\n  * a constructor Nat.ℕ.suc brought into scope by\n    - the opening of Nat (Agda gives no location in a file without goals)\n    - its definition at Nat.agda:5.3-6\n```"
     );
 
     client.request("shutdown", Value::Null);
@@ -1220,7 +1197,7 @@ fn goal_commands() {
     // On a type signature, `Make clause` adds a clause right below it, with
     // names from the types; a constructor gets none.
     let titles = client.code_actions(&goals_uri, json!({ "line": 9, "character": 0 }));
-    assert_eq!(titles, ["Make clause", "Why is `_+_` in scope?"]);
+    assert_eq!(titles, ["Make clause"]);
     let titles = client.code_actions(&goals_uri, json!({ "line": 3, "character": 2 }));
     assert!(!titles.iter().any(|t| t == "Make clause"), "{titles:?}");
     let edits = run(&mut client, "agda.addClause", json!([goals_uri, 9]));
