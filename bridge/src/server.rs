@@ -1755,14 +1755,17 @@ impl LanguageServer for Backend {
             let Some(document) = documents.get(&path) else {
                 return Ok(None);
             };
-            // Goal, name and symbol all for the same hovered char.
-            let offset = text::offset_of(&document.text, position.position);
-            let Some(offset) = text::hovered(&document.text, offset) else {
-                return Ok(None);
-            };
-            match goals::goal_under(&document.goals, offset) {
-                Some(goal) => Ok((goal.id, range_of(&document.text, goal.start, goal.end))),
-                None => {
+            // The goal under the mouse, also on the blank inside an empty
+            // goal. Otherwise goal, name and symbol all for the same hovered
+            // char, which may be the one before the mouse.
+            let at = text::offset_of(&document.text, position.position);
+            let hovered = text::hovered(&document.text, at);
+            let goal = goals::goal_under(&document.goals, at)
+                .or_else(|| hovered.and_then(|offset| goals::goal_under(&document.goals, offset)));
+            match (goal, hovered) {
+                (Some(goal), _) => Ok((goal.id, range_of(&document.text, goal.start, goal.end))),
+                (None, None) => return Ok(None),
+                (None, Some(offset)) => {
                     let symbols = self.0.settings().symbols;
                     let typing = input::symbol_at(&document.text, offset).and_then(
                         |(start, end, symbol)| {

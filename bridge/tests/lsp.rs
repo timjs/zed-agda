@@ -340,11 +340,22 @@ fn drives_agda_through_lsp_and_debug_client() {
     assert!(std::fs::read_to_string(&output).unwrap().contains("?2 : 𝔹"));
 
     // Hover on a hole shows its goal and context.
-    let hover = client.hover(&spike_uri, position_of(&text, "{!   !}", 0));
+    let goal = position_of(&text, "{!   !}", 0);
+    let hover = client.hover(&spike_uri, goal.clone());
     assert!(
         hover.contains("Goal: ℕ") && hover.contains("n : ℕ"),
         "{hover}"
     );
+    // The same on every char of the hole, its blank middle too, and at the
+    // end of the line right after it.
+    let (line, start) = (
+        goal["line"].as_u64().unwrap(),
+        goal["character"].as_u64().unwrap(),
+    );
+    for character in start + 1..=start + 7 {
+        let at = json!({ "line": line, "character": character });
+        assert_eq!(client.hover(&spike_uri, at), hover, "{character}");
+    }
     let hover = client.hover(&spike_uri, position_of(&text, "{!   !}", 1));
     assert!(
         hover.contains("Goal: 𝔹") && hover.contains("b : 𝔹") && !hover.contains("Have:"),

@@ -426,7 +426,9 @@ position, or, on whitespace or past the end of the line, the one before it,
 which matches Zed's range with its end. The goal, the name and the symbol are
 then looked up for that character only (`goals::goal_under`,
 `links::link_under`). Go to definition and the code actions still accept a
-cursor right after a name.
+cursor right after a name. (Phase 3 looks for a goal at the position itself
+first, since the blank middle of an empty goal has no char to decide on; see
+[`PHASE3.md`](PHASE3.md).)
 
 A smaller difference remains, by design: when Agda is busy, or the file is
 not the one Agda loaded last, the type is not known yet and hover shows only
