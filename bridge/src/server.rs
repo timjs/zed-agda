@@ -27,6 +27,10 @@ use crate::settings::Settings;
 use crate::text::{self, Change};
 use crate::{clause, helper, input, iotcm, location, rename, render};
 
+/// How long a hover or a code action waits for Agda to finish another
+/// command.
+const BRIEF_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
 pub const COMMAND_GOAL: &str = "agda.goal";
@@ -464,6 +468,16 @@ impl Bridge {
         Ok(guard)
     }
 
+    /// Lock the Agda session for a hover or a code action, which should not
+    /// wait for a long command, such as a load: wait for it at most
+    /// [`BRIEF_WAIT`]. Most commands, such as another hover's, take
+    /// milliseconds. `None` when Agda stays busy.
+    async fn lock_briefly(&self) -> Option<MutexGuard<'_, Option<Session>>> {
+        tokio::time::timeout(BRIEF_WAIT, self.session.lock())
+            .await
+            .ok()
+    }
+
     /// Run one command; a dead Agda is dropped so the next command restarts it.
     async fn run(
         &self,
@@ -626,17 +640,17 @@ impl Bridge {
     }
 
     /// Goal type and context, rendered as Markdown, and, when the goal has
-    /// text, the type of that text (`Have:`). With `wait` false, return at
-    /// once when Agda is busy instead of queueing behind a long load.
+    /// text, the type of that text (`Have:`). With `wait` false, wait only
+    /// briefly when Agda is busy (see [`Bridge::lock_briefly`]).
     pub async fn goal_info(&self, path: &Path, id: u32, wait: bool) -> Result<String, String> {
         // A goal that is no longer in the buffer is asked for without text.
         let text = self.goal_content(path, id).unwrap_or_default();
         let mut guard = if wait {
             self.lock_session().await?
         } else {
-            self.session
-                .try_lock()
-                .map_err(|_| "Agda is busy. Hover again in a moment.".to_string())?
+            self.lock_briefly()
+                .await
+                .ok_or("Agda is busy. Hover again in a moment.")?
         };
         Self::check_current(&guard, path)?;
         let request = match text.is_empty() {
@@ -709,8 +723,9 @@ impl Bridge {
     }
 
     /// The type of `name` in the scope at the top level of `path`, and why it
-    /// is in scope, for hover: from the cache, or asked from Agda when it is
-    /// not busy and `path` is its current file; `None` when it was not asked.
+    /// is in scope, for hover: from the cache, or asked from Agda when `path`
+    /// is its current file, waiting only briefly when Agda is busy (see
+    /// [`Bridge::lock_briefly`]); `None` when it was not asked.
     async fn name_info(&self, path: &Path, name: &str) -> Option<NameInfo> {
         if let Some(known) = self
             .documents
@@ -721,7 +736,7 @@ impl Bridge {
         {
             return Some(known);
         }
-        let mut guard = self.session.try_lock().ok()?;
+        let mut guard = self.lock_briefly().await?;
         Self::check_current(&guard, path).ok()?;
         let ty = Outcome::collect(
             self.run(&mut guard, &iotcm::infer_toplevel(path, name))
@@ -749,7 +764,7 @@ impl Bridge {
     }
 
     /// The variables of goal `id` to offer for a case split: from the cache,
-    /// or asked from Agda when it is not busy.
+    /// or asked from Agda, waiting only briefly when it is busy.
     async fn goal_split_variables(&self, path: &Path, id: u32) -> Vec<String> {
         let cached = self
             .documents

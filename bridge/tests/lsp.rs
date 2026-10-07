@@ -1282,17 +1282,6 @@ fn goal_commands() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Hover until Agda is free: a hover while Agda works says so.
-fn hover_when_free(client: &mut Client, uri: &str, position: &Value) -> String {
-    loop {
-        let hover = client.hover(uri, position.clone());
-        if hover != "Agda is busy. Hover again in a moment." {
-            return hover;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 #[test]
 fn cancelled_requests_leave_no_answers_behind() {
     let Some(agda) = find_agda() else {
@@ -1321,7 +1310,8 @@ fn cancelled_requests_leave_no_answers_behind() {
 
     // Zed cancels a hover when the mouse moves on. Cancelled right away, on
     // goals and on names Agda was not asked about yet, a hover often goes
-    // while Agda works on it; the next hover still gets its own answer.
+    // while Agda works on it; the next hover waits for that, and gets its
+    // own answer.
     let cancel = |client: &mut Client, position: Value| {
         let id = client.next_id;
         client.next_id += 1;
@@ -1334,23 +1324,15 @@ fn cancelled_requests_leave_no_answers_behind() {
     let names = ["ℕ", "zero", "suc", "double", "𝔹", "tt", "not"];
     for (round, name) in names.iter().enumerate() {
         cancel(&mut client, bool_goal.clone());
-        assert_eq!(
-            hover_when_free(&mut client, &spike_uri, &nat_goal),
-            nat,
-            "{round}"
-        );
+        assert_eq!(client.hover(&spike_uri, nat_goal.clone()), nat, "{round}");
         cancel(&mut client, position_of(&text, name, 0));
-        assert_eq!(
-            hover_when_free(&mut client, &spike_uri, &bool_goal),
-            bool,
-            "{name}"
-        );
+        assert_eq!(client.hover(&spike_uri, bool_goal.clone()), bool, "{name}");
     }
 
     // A name Agda was not asked about gets its own type, and a load its own
     // goals.
     assert_eq!(
-        hover_when_free(&mut client, &spike_uri, &position_of(&text, "+ m = m", 0)),
+        client.hover(&spike_uri, position_of(&text, "+ m = m", 0)),
         "```agda\n_+_ : ℕ → ℕ → ℕ\n```\n\n```text\n_+_ is in scope as\n  * a defined name Spike._+_ brought into scope by\n    - its definition at Spike.agda:7.1-4\n```"
     );
     let changed = format!("{text}\n-- changed\n");
@@ -1367,6 +1349,62 @@ fn cancelled_requests_leave_no_answers_behind() {
     );
     let diagnostics = client.diagnostics(&spike_uri, |_| true);
     assert_eq!(messages(&diagnostics, 3), ["?0 : ℕ", "?1 : ℕ", "?2 : 𝔹"]);
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn hover_waits_briefly_for_agda() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("brief-wait", &["Slow.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize(&root, &agda);
+    let file = root.join("Slow.agda");
+    let file_uri = uri(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": file_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    client.diagnostics(&file_uri, |d| d.len() == 2);
+    let quick = position_of(&text, "{!  !}", 0);
+    let expected = client.hover(&file_uri, quick.clone());
+    assert!(expected.contains("n : ℕ"), "{expected}");
+
+    // The normal form of `ack three eight` keeps Agda busy for seconds. A
+    // hover meanwhile waits for it a second, then says Agda is busy; once
+    // Agda is done, it shows the goal again.
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": "agda.normalForm", "arguments": [file_uri, 0] }),
+    );
+    client.wait_for("progress", |m| {
+        m["method"] == "$/progress" && m["params"]["value"]["kind"] == "begin"
+    });
+    let start = std::time::Instant::now();
+    let hover = client.hover(&file_uri, quick.clone());
+    let waited = start.elapsed();
+    assert_eq!(hover, "Agda is busy. Hover again in a moment.");
+    assert!(waited >= Duration::from_millis(950), "{waited:?}");
+    // Agda was still busy when the hover gave up.
+    assert!(
+        !client
+            .received
+            .iter()
+            .any(|m| m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"),
+        "Agda was done before the hover gave up"
+    );
+    client.wait_for("progress", |m| {
+        m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"
+    });
+    assert_eq!(client.hover(&file_uri, quick), expected);
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

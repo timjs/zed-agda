@@ -47,7 +47,8 @@ nothing. Each cause below was reproduced in an end-to-end test against Agda
    It often is not, briefly: Zed sends a hover for every new mouse position,
    and a code action request for every cursor move, which on an empty goal
    asks Agda for the variables to split. Zed then keeps that popover while
-   the mouse stays in the goal (`same_info_hover`).
+   the mouse stays in the goal (`same_info_hover`). Hover now waits a
+   moment, see below; a longer command is for the goal cache.
 4. **Goals are asked every time.** A name is asked once per load; a goal on
    every hover. With Agda free, in `Spike.agda`, both take under 1 ms (a
    name from the cache 0.13 ms), so this matters in large files with large
@@ -83,12 +84,29 @@ matches Agda's prompts.
 | --- | --- |
 | End to end: 14 hovers, on goals and on names Agda was not asked about yet, each cancelled right away; after each, a hover on a goal shows that goal; then `_+_` its own type, and a load its three goals | passes in three runs, and in each all 14 cancelled hovers left an answer that was dropped (counted with a temporary log line); with the old `agda.rs` it fails in five runs out of five, at the first hover, which shows the other goal |
 
+## Done: hover waits briefly for Agda
+
+Hover on a goal or a name, and the code actions on a goal (for the
+variables to split), no longer give up at once when another command holds
+Agda: they wait for it at most a second (`Bridge::lock_briefly`). Most
+commands take milliseconds, such as another hover's, so these now get their
+answer. A longer command, such as a load or a normal form, still gets
+"Agda is busy" after that second, so a hover never waits for a whole load.
+Zed cancels a waiting hover when the mouse moves on, which takes it out of
+the line; since the previous step, that is safe also once its command has
+been sent.
+
+Commands that change the file (give, case split and the others) and the
+load still wait as long as needed, as before.
+
+| Check | Result |
+| --- | --- |
+| End to end: the 14 cancelled hovers of the previous step, now with every next hover answered at once, without hovering again when Agda was busy | passes; with the old code the first hover after a cancel says "Agda is busy", in three runs out of three |
+| End to end: while Agda computes the normal form of `ack three eight` (about 2.5 s, fixture `Slow.agda`), a hover on another goal says "Agda is busy" after a second, while Agda is still busy; afterwards it shows the goal | passes; with the old code the hover gives up after 0.2 ms, in three runs out of three |
+
 ## Planned
 
-1. **Hover waits briefly for Agda** (cause 3), up to about a second,
-   instead of saying "Agda is busy" at once; most commands take
-   milliseconds, and Zed cancels a hover it no longer needs.
-2. **A goal cache** (causes 3 and 4). Per goal, what is known about it: after
+1. **A goal cache** (causes 3 and 4). Per goal, what is known about it: after
    a load only its type (which the bridge keeps for the diagnostics), after
    the first hover the whole answer, for a goal with text together with that
    text. Hover shows it at once, and while Agda is busy shows what it has,
