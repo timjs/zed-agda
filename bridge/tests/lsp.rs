@@ -1272,6 +1272,131 @@ fn goal_commands() {
 }
 
 #[test]
+fn makes_helper_functions() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("helper-functions", &["Helper.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize(&root, &agda);
+    let file = root.join("Helper.agda");
+    let file_uri = uri(&file);
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": file_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    let diagnostics = client.diagnostics(&file_uri, |d| d.len() == 2);
+    assert_eq!(messages(&diagnostics, 3), ["?0 : ℕ", "?1 : ℕ"]);
+    let mut version = 1;
+    let mut change = |client: &mut Client, text: &str| {
+        version += 1;
+        client.notify(
+            "textDocument/didChange",
+            json!({ "textDocument": { "uri": file_uri, "version": version },
+                    "contentChanges": [{ "text": text }] }),
+        );
+    };
+    let save = |client: &mut Client, text: &str| {
+        std::fs::write(&file, text).unwrap();
+        client.received.clear();
+        client.notify(
+            "textDocument/didSave",
+            json!({ "textDocument": { "uri": uri(&file) } }),
+        );
+    };
+    let run = |client: &mut Client, goal: u32| -> Vec<Value> {
+        client.received.clear();
+        client.request(
+            "workspace/executeCommand",
+            json!({ "command": "agda.makeHelper", "arguments": [uri(&file), goal] }),
+        );
+        let edit = client.wait_for("applyEdit", |m| m["method"] == "workspace/applyEdit");
+        edit["params"]["edit"]["changes"][&uri(&file)]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+
+    // Offered for a new name, not for one Agda saw in the file (`suc`, the
+    // bound `n`).
+    let titles = client.code_actions(&file_uri, position_of(&text, "aux n m", 0));
+    assert_eq!(
+        titles,
+        [
+            "Give",
+            "Refine",
+            "Case split on `aux n m`",
+            "Make helper function `aux`",
+            "Auto",
+            "Solve",
+            "Solve all goals",
+            "Print goal in output",
+            "Print normal form in output",
+            "Open output file"
+        ]
+    );
+
+    // The helper goes above `_+_`, and the call, inside `suc`, in
+    // parentheses.
+    let edits = run(&mut client, 0);
+    text = apply_all(&text, &edits);
+    assert!(
+        text.contains(
+            "aux : (n m : ℕ) → ℕ\naux n m = {!  !}\n\n_+_ : ℕ → ℕ → ℕ\nzero  + m = m\nsuc n + m = suc (aux n m)\n"
+        ),
+        "{text}"
+    );
+    change(&mut client, &text);
+
+    // A second helper waits for a save: Agda would name it `aux`.
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": "agda.makeHelper", "arguments": [file_uri, 1] }),
+    );
+    let message = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
+    assert!(
+        message["params"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Save the file first"),
+        "{message}"
+    );
+
+    // Agda accepts the helper; in a `where` block, the next one goes above
+    // `twice`, at its indentation, and the call is the whole right-hand side.
+    save(&mut client, &text);
+    let diagnostics = client.diagnostics(&file_uri, |d| d.len() == 2);
+    assert_eq!(messages(&diagnostics, 3), ["?0 : ℕ", "?1 : ℕ"]);
+    let with_aux = text.clone();
+    let where_block = "  where\n    go : (k : ℕ) → ℕ\n    go k = {!  !}\n\n    twice : ℕ → ℕ\n    twice k = go k\n";
+    let edits = run(&mut client, 1);
+    text = apply_all(&text, &edits);
+    assert!(text.ends_with(where_block), "{text}");
+    change(&mut client, &text);
+
+    // Undone and saved, the text is the one Agda loaded, but Agda still
+    // loads it again, so the same helper can be made once more.
+    change(&mut client, &with_aux);
+    save(&mut client, &with_aux);
+    client.diagnostics(&file_uri, |d| d.len() == 2);
+    let edits = run(&mut client, 1);
+    text = apply_all(&with_aux, &edits);
+    assert!(text.ends_with(where_block), "{text}");
+    change(&mut client, &text);
+    save(&mut client, &text);
+    let diagnostics = client.diagnostics(&file_uri, |d| d.len() == 2);
+    assert_eq!(messages(&diagnostics, 3), ["?0 : ℕ", "?1 : ℕ"]);
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn renames_across_open_files() {
     let Some(agda) = find_agda() else {
         eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");

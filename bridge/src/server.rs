@@ -25,7 +25,7 @@ use crate::protocol::{
 };
 use crate::settings::Settings;
 use crate::text::{self, Change};
-use crate::{clause, input, iotcm, location, rename, render};
+use crate::{clause, helper, input, iotcm, location, rename, render};
 
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
@@ -37,6 +37,7 @@ pub const COMMAND_SOLVE: &str = "agda.solve";
 pub const COMMAND_SOLVE_ALL: &str = "agda.solveAll";
 pub const COMMAND_ADD_WITH: &str = "agda.addWith";
 pub const COMMAND_ADD_CLAUSE: &str = "agda.addClause";
+pub const COMMAND_MAKE_HELPER: &str = "agda.makeHelper";
 pub const COMMAND_OPEN_OUTPUT: &str = "agda.openOutput";
 
 /// The extensions Agda accepts, as listed in its `InvalidExtensionError`.
@@ -174,6 +175,10 @@ struct Session {
     agda: Agda,
     /// Agda keeps one "current file"; goal commands only work on that file.
     current_file: Option<PathBuf>,
+    /// Whether Agda made a helper function since it last loaded a file:
+    /// Agda 2.8 then gives the next one names of the first (see
+    /// [`Bridge::make_helper`]).
+    helper_made: bool,
 }
 
 /// The goal commands that end in Agda's `GiveAction`.
@@ -329,6 +334,18 @@ fn split_variables(info: &GoalInfo) -> Vec<String> {
         .collect()
 }
 
+/// Whether Agda's highlighting from the last load has `name` in the
+/// document, defined or used, also qualified (`N.suc` for `suc`).
+fn names_known(document: &Document, name: &str) -> bool {
+    let chars: Vec<char> = document.text.chars().collect();
+    document.links.iter().any(|link| {
+        chars.get(link.start..link.end).is_some_and(|occurrence| {
+            let occurrence: String = occurrence.iter().collect();
+            rename::unqualified(&occurrence) == name
+        })
+    })
+}
+
 fn uri_of(path: &Path) -> Option<Uri> {
     Uri::from_file_path(path)
 }
@@ -441,6 +458,7 @@ impl Bridge {
             *guard = Some(Session {
                 agda,
                 current_file: None,
+                helper_made: false,
             });
         }
         Ok(guard)
@@ -496,7 +514,9 @@ impl Bridge {
             .and_then(|d| d.loaded_text.as_ref())
             == Some(&snapshot);
         let current = guard.as_ref().and_then(|s| s.current_file.as_deref()) == Some(path);
-        if unchanged && current {
+        // After a helper function, load even the same text, to reset Agda.
+        let helper_made = guard.as_ref().is_some_and(|session| session.helper_made);
+        if unchanged && current && !helper_made {
             return Ok("Already loaded.".into());
         }
 
@@ -515,6 +535,7 @@ impl Bridge {
         let outcome = Outcome::collect(result?);
         if let Some(session) = guard.as_mut() {
             session.current_file = Some(path.to_path_buf());
+            session.helper_made = false;
         }
         drop(guard);
 
@@ -1006,6 +1027,103 @@ impl Bridge {
         Ok("Added a clause. Save the file to load it.".into())
     }
 
+    /// Make a helper function for goal `id`, as Idris's "make lemma" does:
+    /// the goal's text is the call (`aux n m`). Agda gives the helper's type
+    /// (Emacs's `C-c C-h` shows it); the bridge adds that signature, and a
+    /// clause for it, above the definition the goal is in (see `helper.rs`),
+    /// and puts the call in place of the goal.
+    pub async fn make_helper(&self, path: &Path, id: u32) -> Result<String, String> {
+        let text = self.goal_content(path, id)?;
+        if helper::head(&text).is_none() {
+            return Err(format!(
+                "Type a call of the helper function in goal ?{id} first, such as `aux n m`."
+            ));
+        }
+        let mut guard = self.lock_session().await?;
+        Self::check_current(&guard, path)?;
+        // Agda 2.8 names a second helper function, and the variables in its
+        // type, after the first one, until it loads the file again.
+        if guard.as_ref().is_some_and(|session| session.helper_made) {
+            return Err(
+                "Save the file first, so that Agda loads it again: until then, \
+                 Agda gives a second helper function the names of the first."
+                    .into(),
+            );
+        }
+        let outcome = Outcome::collect(
+            self.run(&mut guard, &iotcm::helper_function(path, id, &text))
+                .await?,
+        );
+        let Some((_, GoalInfo::HelperFunction { signature })) = outcome.goal_info.clone() else {
+            drop(guard);
+            self.show_output(&format!("Helper function ?{id}"), path, &outcome.markdown())
+                .await;
+            return Err(outcome
+                .errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Agda gave no helper function.".into()));
+        };
+        if let Some(session) = guard.as_mut() {
+            session.helper_made = true;
+        }
+        drop(guard);
+
+        // Agda's name, which differs from the typed one when that is taken.
+        let name = signature
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let call = helper::call(&text, &name).unwrap_or_else(|| text.clone());
+        let edits = {
+            let mut documents = self.documents.lock().unwrap();
+            let document = documents.get_mut(path).ok_or("This file was closed.")?;
+            let goal = document
+                .goals
+                .iter()
+                .find(|goal| goal.id == id)
+                .cloned()
+                .ok_or(format!("Goal ?{id} disappeared while Agda was working."))?;
+            // In parentheses, unless the call is a lone name or the whole
+            // right-hand side of a clause.
+            let call = match call == name || goals::add_with(&document.text, &goal).is_some() {
+                true => call,
+                false => format!("({call})"),
+            };
+            let line = document
+                .text
+                .chars()
+                .take(goal.start)
+                .filter(|c| *c == '\n')
+                .count();
+            let (at, indent) = helper::place(&document.text, line);
+            let start: usize = document
+                .text
+                .split('\n')
+                .take(at)
+                .map(|line| line.chars().count() + 1)
+                .sum();
+            // The call first: it comes after the declaration, so both edits
+            // refer to the text Zed has.
+            let call_edit = document.replace(goal.start, goal.end, &call, false);
+            let declaration = helper::declaration(&signature, &indent);
+            let declaration_edit = document.replace(start, start, &declaration, false);
+            vec![declaration_edit, call_edit]
+        };
+        self.apply_edits(path, edits).await?;
+        self.publish(path).await;
+        let markdown = format!(
+            "Added `{name}` above the definition of goal ?{id}, and called it there:\n\n\
+             ```agda\n{signature}\n```\n\nSave the file to load it, so that its goal gets a number.\n"
+        );
+        self.show_output(&format!("Helper function {name}"), path, &markdown)
+            .await;
+        Ok(format!(
+            "Added the helper function {name}. Save the file to load it."
+        ))
+    }
+
     /// Fill the goals that unification already solved, as Emacs does: Agda
     /// names a solution for each, which is then given. Only goal `id`, or
     /// all goals.
@@ -1478,6 +1596,7 @@ impl LanguageServer for Backend {
                         COMMAND_SOLVE_ALL.into(),
                         COMMAND_ADD_WITH.into(),
                         COMMAND_ADD_CLAUSE.into(),
+                        COMMAND_MAKE_HELPER.into(),
                         COMMAND_OPEN_OUTPUT.into(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -1803,7 +1922,12 @@ impl LanguageServer for Backend {
             let offset = text::offset_of(&document.text, params.range.start);
             let goal = goals::goal_at(&document.goals, offset).map(|goal| {
                 let with = goals::add_with(&document.text, goal).is_some();
-                (goal.id, goal.content(&document.text), with)
+                let content = goal.content(&document.text);
+                // Not for a name Agda saw in the file, as in `suc n`.
+                let helper = helper::head(&content)
+                    .filter(|name| !names_known(document, name))
+                    .map(String::from);
+                (goal.id, content, with, helper)
             });
             let line = params.range.start.line;
             let on_problem = document
@@ -1835,7 +1959,7 @@ impl LanguageServer for Backend {
                 Some(CodeActionKind::REFACTOR_REWRITE),
             ));
         }
-        if let Some((id, content, with)) = &goal {
+        if let Some((id, content, with, helper)) = &goal {
             let id = *id;
             let rewrite = Some(CodeActionKind::REFACTOR_REWRITE);
             let goal_action = |title: &str, command: &str| {
@@ -1871,6 +1995,12 @@ impl LanguageServer for Backend {
                     false => format!("With-abstract on `{content}`"),
                 };
                 actions.push(goal_action(&title, COMMAND_ADD_WITH));
+            }
+            if let Some(name) = helper {
+                actions.push(goal_action(
+                    &format!("Make helper function `{name}`"),
+                    COMMAND_MAKE_HELPER,
+                ));
             }
             actions.push(goal_action("Auto", COMMAND_AUTO));
             actions.push(goal_action("Solve", COMMAND_SOLVE));
@@ -1943,6 +2073,7 @@ impl LanguageServer for Backend {
                 }
                 (COMMAND_SOLVE, Some(id)) => bridge.solve(&path, Some(id)).await,
                 (COMMAND_ADD_WITH, Some(id)) => bridge.add_with(&path, id).await,
+                (COMMAND_MAKE_HELPER, Some(id)) => bridge.make_helper(&path, id).await,
                 (COMMAND_NORMAL_FORM, Some(id)) => bridge.normal_form(&path, id).await,
                 // For this command the number is a line, not a goal.
                 (COMMAND_ADD_CLAUSE, Some(line)) => bridge.add_clause(&path, line as usize).await,

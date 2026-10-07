@@ -3,7 +3,7 @@
 Phase 2 polishes what phase 1 ([`PHASE1.md`](PHASE1.md)) built, after using it
 every day: options for symbol input, clearer code actions, renaming, settings
 that change while Zed runs, the outline, `Make clause`, hover on symbols and
-names, and the type and normal form of a goal's text.
+names, the type and normal form of a goal's text, and helper functions.
 `PLAN.md` calls this phase "Polish". The sections follow the order in which
 the work was done.
 
@@ -558,16 +558,67 @@ suc x
 | Agda's `NormalForm` answer is read; the command is built; the output names the text on one line | passes |
 | End to end: offered on goals with text only; for `id (suc x)` a progress message, and `suc x` in the output file | passes; fails when the action is offered on an empty goal |
 
+## Done: making a helper function
+
+On a goal whose text calls a name that is not in the file yet, as in
+`{! aux n m !}`, the code action ``Make helper function `aux` `` adds the
+helper above the definition the goal is in, and calls it in the goal:
+
+```agda
+aux : (n m : ℕ) → ℕ
+aux n m = {!  !}
+
+_+_ : ℕ → ℕ → ℕ
+zero  + m = m
+suc n + m = suc (aux n m)
+```
+
+1. **Agda's answer.** `Cmd_helper_function AsIs <goal> noRange "aux n m"`
+   answers (checked with Agda 2.8.0.2) with a `GoalSpecific` of the kind
+   `HelperFunction`, with the signature `aux : (n m : ℕ) → ℕ`. Agda adds the
+   variables that the types of the arguments need (`help x`, with `x : A`,
+   gives `help : ∀ {A} (x : A) → A`), and renames a name that is taken
+   (`suc n` gives `suc₁`); the call then gets Agda's name too. A long type
+   comes over several lines, indented under the name. `AsIs` is what Emacs's
+   `C-c C-h` sends (`agda2-helper-function-type` in `agda2-mode.el`); Emacs
+   only shows the signature and copies it, the rest follows Idris's "make
+   lemma".
+2. **The clause** comes from the signature, as for `Make clause`
+   (`clause.rs`): `help : ∀ {A} (x : A) → A` gets `help x = {!  !}`.
+3. **Where it goes** (`helper.rs`): above the signature of the definition the
+   goal is in, at its indentation, so a helper for a goal in a `where` block
+   goes in that block. Walking up from the goal's line, a less indented line
+   is the clause the goal's line continues, and with-clauses (`...`) are
+   passed. A signature counts only when it names the goal's clause (the name
+   as a word, or every part of an operator); a definition without one gets
+   the helper right above the goal's clause. The helper never goes above a
+   `where`, `module`, `data`, `open` or the like that the definition is in.
+4. **The call** is the goal's text with Agda's name, in parentheses unless it
+   is a lone name or the whole right-hand side of a clause.
+5. **Which goals.** It is offered when the first word of the goal's text can
+   be a name and is not one that Agda's highlighting has in the file,
+   defined or used, so not for `{! suc n !}` or `{! n !}`.
+6. **A bug in Agda 2.8.0.2.** After one helper function, Agda names the next
+   one, and the variables in its type, after the first: asked for `go k`
+   after `aux n m`, it answers `aux : (n : ℕ) → ℕ`. Other commands in between
+   neither matter nor suffer, a request that fails does not count, and a
+   load resets it (each checked with a fresh Agda). So the bridge refuses a
+   second helper until the file is loaded again, which saving does, and it
+   then loads even text that Agda already has, as after undoing the helper.
+
+| Check | Result |
+| --- | --- |
+| Agda's `HelperFunction` answer is read; the command is built | passes |
+| The helper's name and the renamed call; the declaration with its clause, also over several lines | passes |
+| The place: past another clause, from the line a clause goes on to; in a `where` block; without a signature; a signature over two lines; never above `data` or `module`; past with-clauses; a `where` after the goal | passes |
+| End to end: offered for `aux`, not for names in the file; `aux` goes above `_+_` and the goal becomes `suc (aux n m)`; a second helper is refused before saving; after saving, Agda accepts the helper, and `go` goes above `twice` in its `where` block; undone and saved, the same helper can be made again | passes; fails without the parentheses, without the filter, or when the undone text is not loaded again |
+| Without the refusal, the second helper for `go k` | `aux : (n : ℕ) → ℕ`, called as `aux k`: Agda's bug, through the bridge |
+
 ## Next steps
 
 Still to do in this phase:
 
-1. **Create a helper function**, as a code action on a goal with an
-   expression: Agda gives the type of a function that abstracts the goal's
-   expression over its free variables (`Cmd_helper_function`); the bridge
-   adds that signature, and a clause for it, above the definition the goal is
-   in, and calls it in the goal.
-2. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+1. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.
 
 The hover cache moved to phase 3, optimisations ([`PHASE3.md`](PHASE3.md)).

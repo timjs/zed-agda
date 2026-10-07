@@ -46,6 +46,9 @@ pub fn goal(id: u32, info: &GoalInfo) -> String {
             out
         }
         GoalInfo::NormalForm { expr } => normal_form(id, None, expr),
+        GoalInfo::HelperFunction { signature } => {
+            format!("**Helper function for ?{id}**\n\n```agda\n{signature}\n```\n")
+        }
         GoalInfo::Other => format!(
             "**Goal ?{id}**\n\n(Agda sent goal information this version cannot show yet.)\n"
         ),

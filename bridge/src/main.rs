@@ -8,6 +8,7 @@
 mod agda;
 mod clause;
 mod goals;
+mod helper;
 mod highlight;
 mod input;
 mod iotcm;

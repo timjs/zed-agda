@@ -249,6 +249,9 @@ pub enum GoalInfo {
     },
     /// The normal form of an expression in a goal, from `Cmd_compute`.
     NormalForm { expr: String },
+    /// The signature of a helper function, from `Cmd_helper_function`, such
+    /// as `aux : (n m : ℕ) → ℕ`.
+    HelperFunction { signature: String },
     #[serde(other)]
     Other,
 }
@@ -464,6 +467,18 @@ mod tests {
                 goal_info: GoalInfo::NormalForm { expr },
                 ..
             } if expr == "suc (suc (suc (suc zero)))"
+        ));
+
+        let helper = r#"{"info":{"goalInfo":{"kind":"HelperFunction","signature":"aux : (n m : ℕ) → ℕ"},"interactionPoint":{"id":0,"range":[]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}"#;
+        let Response::DisplayInfo { info } = parse_line(helper).unwrap() else {
+            panic!("expected DisplayInfo");
+        };
+        assert!(matches!(
+            DisplayInfo::parse(&info),
+            DisplayInfo::GoalSpecific {
+                goal_info: GoalInfo::HelperFunction { signature },
+                ..
+            } if signature == "aux : (n m : ℕ) → ℕ"
         ));
 
         let auto = r#"{"info":{"info":"No solution found","kind":"Auto"},"kind":"DisplayInfo"}"#;

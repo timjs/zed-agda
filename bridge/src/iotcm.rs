@@ -92,6 +92,19 @@ pub fn compute(file: &Path, goal: u32, expr: &str) -> String {
     )
 }
 
+/// `Cmd_helper_function AsIs <goal> noRange "<call>"`: the type of a helper
+/// function that `call` (`aux n m`) would call in the goal (Emacs's
+/// `C-c C-h`, which also asks `AsIs`).
+pub fn helper_function(file: &Path, goal: u32, call: &str) -> String {
+    iotcm(
+        file,
+        &format!(
+            "Cmd_helper_function AsIs {goal} noRange {}",
+            haskell_quote(call)
+        ),
+    )
+}
+
 /// `Cmd_give WithoutForce <goal> noRange "<expr>"`: fill a goal.
 pub fn give(file: &Path, goal: u32, expr: &str) -> String {
     iotcm(
@@ -220,6 +233,10 @@ mod tests {
         assert_eq!(
             goal_type_context_infer(file, 2, "n + n"),
             envelope(r#"Cmd_goal_type_context_infer Simplified 2 noRange "n + n""#)
+        );
+        assert_eq!(
+            helper_function(file, 0, "aux n m"),
+            envelope(r#"Cmd_helper_function AsIs 0 noRange "aux n m""#)
         );
         assert_eq!(
             compute(file, 1, "two + two"),

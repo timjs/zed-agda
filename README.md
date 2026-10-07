@@ -109,12 +109,16 @@ The code actions (`cmd-.` on macOS, `ctrl-.` on Linux) are:
 | an empty goal | `Case split on result` | introduce the missing patterns, or split on the result |
 | a goal with text | ``Case split on `x y` `` | split on the variables typed in the goal |
 | a goal that is a whole right-hand side | `With-abstract`, ``With-abstract on `e` `` | `f n = {! e !}` becomes `f n with e` and `... \| w = {!  !}` (as Idris's "add with") |
+| a goal whose text calls a new name | ``Make helper function `aux` `` | `{! aux n m !}` becomes `aux n m`, in parentheses where needed, and `aux : (n m : ℕ) → ℕ` with the clause `aux n m = {!  !}` goes above the definition (the type from Agda, as Emacs's `C-c C-h`; the rest as Idris's "make lemma") |
 | a goal | `Auto`, `Solve`, `Solve all goals` | proof search, or the solutions unification already found |
 | a goal with text | `Print normal form in output` | the normal form of the text, as Emacs's `C-c C-n` |
 | a goal or an error | `Print goal in output`, `Open output file` | the output file |
 
-New clauses, from `Make clause`, a case split or `With-abstract`, are loaded
-when you save the file; until then their goals have no number.
+New clauses, from `Make clause`, a case split, `With-abstract` or a helper
+function, are loaded when you save the file; until then their goals have no
+number. Save between two helper functions too: until Agda loads the file
+again, Agda 2.8 gives the second one the names of the first, so the bridge
+waits for it.
 
 ### Moving between goals
 
