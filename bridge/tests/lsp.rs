@@ -1282,6 +1282,98 @@ fn goal_commands() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Hover until Agda is free: a hover while Agda works says so.
+fn hover_when_free(client: &mut Client, uri: &str, position: &Value) -> String {
+    loop {
+        let hover = client.hover(uri, position.clone());
+        if hover != "Agda is busy. Hover again in a moment." {
+            return hover;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn cancelled_requests_leave_no_answers_behind() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("cancelled", &["Spike.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize(&root, &agda);
+    let spike = root.join("Spike.agda");
+    let spike_uri = uri(&spike);
+    let text = std::fs::read_to_string(&spike).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": spike_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    client.diagnostics(&spike_uri, |d| d.len() == 3);
+    let nat_goal = position_of(&text, "{!   !}", 0);
+    let bool_goal = position_of(&text, "{!   !}", 1);
+    let nat = client.hover(&spike_uri, nat_goal.clone());
+    let bool = client.hover(&spike_uri, bool_goal.clone());
+    assert!(
+        nat.contains("Goal: ℕ") && bool.contains("Goal: 𝔹"),
+        "{nat}{bool}"
+    );
+
+    // Zed cancels a hover when the mouse moves on. Cancelled right away, on
+    // goals and on names Agda was not asked about yet, a hover often goes
+    // while Agda works on it; the next hover still gets its own answer.
+    let cancel = |client: &mut Client, position: Value| {
+        let id = client.next_id;
+        client.next_id += 1;
+        client.send(
+            json!({ "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+            "params": { "textDocument": { "uri": uri(&spike) }, "position": position } }),
+        );
+        client.notify("$/cancelRequest", json!({ "id": id }));
+    };
+    let names = ["ℕ", "zero", "suc", "double", "𝔹", "tt", "not"];
+    for (round, name) in names.iter().enumerate() {
+        cancel(&mut client, bool_goal.clone());
+        assert_eq!(
+            hover_when_free(&mut client, &spike_uri, &nat_goal),
+            nat,
+            "{round}"
+        );
+        cancel(&mut client, position_of(&text, name, 0));
+        assert_eq!(
+            hover_when_free(&mut client, &spike_uri, &bool_goal),
+            bool,
+            "{name}"
+        );
+    }
+
+    // A name Agda was not asked about gets its own type, and a load its own
+    // goals.
+    assert_eq!(
+        hover_when_free(&mut client, &spike_uri, &position_of(&text, "+ m = m", 0)),
+        "```agda\n_+_ : ℕ → ℕ → ℕ\n```\n\n```text\n_+_ is in scope as\n  * a defined name Spike._+_ brought into scope by\n    - its definition at Spike.agda:7.1-4\n```"
+    );
+    let changed = format!("{text}\n-- changed\n");
+    std::fs::write(&spike, &changed).unwrap();
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": spike_uri, "version": 2 },
+                "contentChanges": [{ "text": changed }] }),
+    );
+    client.received.clear();
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": spike_uri } }),
+    );
+    let diagnostics = client.diagnostics(&spike_uri, |_| true);
+    assert_eq!(messages(&diagnostics, 3), ["?0 : ℕ", "?1 : ℕ", "?2 : 𝔹"]);
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn makes_helper_functions() {
     let Some(agda) = find_agda() else {

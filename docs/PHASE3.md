@@ -42,7 +42,7 @@ nothing. Each cause below was reproduced in an end-to-end test against Agda
    the one before it, until the bridge restarts. A goal hover then shows
    nothing when it reads a name's answer, or another goal when it reads a
    goal's; a name can show nothing until the next load, and a load can
-   publish no goals at all.
+   publish no goals at all. Fixed, see below.
 3. **"Agda is busy".** Hover asks Agda only when it is free at that moment.
    It often is not, briefly: Zed sends a hover for every new mouse position,
    and a code action request for every cursor move, which on an empty goal
@@ -65,16 +65,30 @@ goal before still does.
 | --- | --- |
 | End to end: every char of `{!   !}` and the end of the line right after it show the same hover as its `{` | passes; with the old lookup the second space shows nothing |
 
+## Done: commands that survive a cancelled request
+
+`Agda` (`agda.rs`) counts the commands it sent whose prompt it has not read
+yet. That is more than zero only when a caller went away while Agda worked,
+as a hover that Zed cancelled. Before the next command, it reads and drops
+what such a command left, up to its prompt, so every command reads its own
+answer again. Agda still finishes the cancelled command first, as it did
+before, since it does one command at a time.
+
+A command counts as soon as its whole line is written, in one write. A
+caller that goes away before that leaves at most part of a line, which
+joins the next command into one line with one answer, so the count still
+matches Agda's prompts.
+
+| Check | Result |
+| --- | --- |
+| End to end: 14 hovers, on goals and on names Agda was not asked about yet, each cancelled right away; after each, a hover on a goal shows that goal; then `_+_` its own type, and a load its three goals | passes in three runs, and in each all 14 cancelled hovers left an answer that was dropped (counted with a temporary log line); with the old `agda.rs` it fails in five runs out of five, at the first hover, which shows the other goal |
+
 ## Planned
 
-1. **Commands that survive a cancelled request** (cause 2). `Agda` counts
-   the commands whose prompt it has not read, and before the next command
-   reads and drops what a cancelled one left. The reproduction becomes a
-   test.
-2. **Hover waits briefly for Agda** (cause 3), up to about a second,
+1. **Hover waits briefly for Agda** (cause 3), up to about a second,
    instead of saying "Agda is busy" at once; most commands take
    milliseconds, and Zed cancels a hover it no longer needs.
-3. **A goal cache** (causes 3 and 4). Per goal, what is known about it: after
+2. **A goal cache** (causes 3 and 4). Per goal, what is known about it: after
    a load only its type (which the bridge keeps for the diagnostics), after
    the first hover the whole answer, for a goal with text together with that
    text. Hover shows it at once, and while Agda is busy shows what it has,

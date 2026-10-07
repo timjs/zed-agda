@@ -3,6 +3,12 @@
 //! Agda handles one command at a time and signals completion with the
 //! `JSON> ` prompt, so [`Agda::run`] takes `&mut self`: callers serialise
 //! access by keeping the process behind a mutex.
+//!
+//! A caller may go away while Agda works on its command: Zed cancels a hover
+//! when the mouse moves on, and the language server then drops the request.
+//! Agda answers anyway, so [`Agda::run`] first drops what such a command left
+//! behind; otherwise every later command would read the answer of the one
+//! before it.
 
 use std::io;
 use std::process::Stdio;
@@ -18,6 +24,9 @@ pub struct Agda {
     _child: Child,
     stdin: ChildStdin,
     events: mpsc::UnboundedReceiver<Event>,
+    /// Commands sent whose prompt has not been read yet: more than zero
+    /// only when a caller went away during [`Agda::run`].
+    unanswered: usize,
 }
 
 impl Agda {
@@ -65,6 +74,7 @@ impl Agda {
             _child: child,
             stdin,
             events,
+            unanswered: 0,
         };
         match tokio::time::timeout(Duration::from_secs(60), agda.events.recv()).await {
             Ok(Some(Event::Prompt)) => Ok(agda),
@@ -82,15 +92,33 @@ impl Agda {
 
     /// Send one IOTCM command and collect its responses up to the next prompt.
     pub async fn run(&mut self, command: &str) -> io::Result<Vec<Response>> {
+        // Drop the answers of commands whose callers went away.
+        while self.unanswered > 0 {
+            match self.events.recv().await {
+                Some(Event::Prompt) => self.unanswered -= 1,
+                Some(Event::Line(_)) => {}
+                None => return Err(io::Error::other("Agda exited")),
+            }
+        }
+
         eprintln!("agda-bridge: > {command}");
-        self.stdin.write_all(command.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
+        // Counted as soon as the whole line is written. A caller that goes
+        // away before that leaves at most part of a line, which joins the
+        // next command into one line with one answer, so the count still
+        // matches Agda's prompts.
+        self.stdin
+            .write_all(format!("{command}\n").as_bytes())
+            .await?;
+        self.unanswered += 1;
         self.stdin.flush().await?;
 
         let mut responses = Vec::new();
         loop {
             match self.events.recv().await {
-                Some(Event::Prompt) => return Ok(responses),
+                Some(Event::Prompt) => {
+                    self.unanswered -= 1;
+                    return Ok(responses);
+                }
                 Some(Event::Line(line)) => match parse_line(&line) {
                     Ok(response) => responses.push(response),
                     Err(err) => eprintln!("agda-bridge: unparsed output ({err}): {line}"),
