@@ -237,12 +237,30 @@ pub enum GoalInfo {
     GoalType {
         #[serde(rename = "type")]
         ty: String,
+        /// What comes with the goal's type: with
+        /// `Cmd_goal_type_context_infer`, the type of the goal's text.
+        #[serde(default)]
+        type_aux: TypeAux,
         entries: Vec<ContextEntry>,
         #[serde(default)]
         boundary: Vec<Value>,
         #[serde(default)]
         output_forms: Vec<Value>,
     },
+    /// The normal form of an expression in a goal, from `Cmd_compute`.
+    NormalForm { expr: String },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum TypeAux {
+    /// Only the goal's type.
+    #[default]
+    GoalOnly,
+    /// The type Agda inferred for the goal's text, shown as `Have:`.
+    GoalAndHave { expr: String },
     #[serde(other)]
     Other,
 }
@@ -407,6 +425,45 @@ mod tests {
             DisplayInfo::parse(&info),
             DisplayInfo::WhyInScope { message }
                 if message.starts_with("suc is in scope as\n  * a constructor")
+        ));
+
+        // The goal with the type of its text, and the normal form of its
+        // text, shortened from Agda 2.8.0's answers.
+        let have = r#"{"info":{"goalInfo":{"boundary":[],"entries":[{"binding":"ℕ","inScope":true,"originalName":"n","reifiedName":"n"}],"kind":"GoalType","outputForms":[],"rewrite":"Simplified","type":"ℕ","typeAux":{"expr":"ℕ → ℕ","kind":"GoalAndHave"}},"interactionPoint":{"id":3,"range":[]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}"#;
+        let Response::DisplayInfo { info } = parse_line(have).unwrap() else {
+            panic!("expected DisplayInfo");
+        };
+        assert!(matches!(
+            DisplayInfo::parse(&info),
+            DisplayInfo::GoalSpecific {
+                goal_info: GoalInfo::GoalType { type_aux: TypeAux::GoalAndHave { expr }, entries, .. },
+                ..
+            } if expr == "ℕ → ℕ" && entries.len() == 1
+        ));
+        let only = r#"{"info":{"goalInfo":{"entries":[],"kind":"GoalType","type":"ℕ","typeAux":{"kind":"GoalOnly"}},"interactionPoint":{"id":4,"range":[]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}"#;
+        let Response::DisplayInfo { info } = parse_line(only).unwrap() else {
+            panic!("expected DisplayInfo");
+        };
+        assert!(matches!(
+            DisplayInfo::parse(&info),
+            DisplayInfo::GoalSpecific {
+                goal_info: GoalInfo::GoalType {
+                    type_aux: TypeAux::GoalOnly,
+                    ..
+                },
+                ..
+            }
+        ));
+        let normal = r#"{"info":{"goalInfo":{"computeMode":"DefaultCompute","expr":"suc (suc (suc (suc zero)))","kind":"NormalForm"},"interactionPoint":{"id":1,"range":[]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}"#;
+        let Response::DisplayInfo { info } = parse_line(normal).unwrap() else {
+            panic!("expected DisplayInfo");
+        };
+        assert!(matches!(
+            DisplayInfo::parse(&info),
+            DisplayInfo::GoalSpecific {
+                goal_info: GoalInfo::NormalForm { expr },
+                ..
+            } if expr == "suc (suc (suc (suc zero)))"
         ));
 
         let auto = r#"{"info":{"info":"No solution found","kind":"Auto"},"kind":"DisplayInfo"}"#;

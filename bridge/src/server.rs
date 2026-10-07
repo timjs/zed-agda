@@ -30,6 +30,7 @@ use crate::{clause, input, iotcm, location, rename, render};
 pub const COMMAND_GIVE: &str = "agda.give";
 pub const COMMAND_REFINE: &str = "agda.refine";
 pub const COMMAND_GOAL: &str = "agda.goal";
+pub const COMMAND_NORMAL_FORM: &str = "agda.normalForm";
 pub const COMMAND_CASE_SPLIT: &str = "agda.caseSplit";
 pub const COMMAND_AUTO: &str = "agda.auto";
 pub const COMMAND_SOLVE: &str = "agda.solve";
@@ -603,9 +604,12 @@ impl Bridge {
         })
     }
 
-    /// Goal type and context, rendered as Markdown. With `wait` false, return
-    /// at once when Agda is busy instead of queueing behind a long load.
+    /// Goal type and context, rendered as Markdown, and, when the goal has
+    /// text, the type of that text (`Have:`). With `wait` false, return at
+    /// once when Agda is busy instead of queueing behind a long load.
     pub async fn goal_info(&self, path: &Path, id: u32, wait: bool) -> Result<String, String> {
+        // A goal that is no longer in the buffer is asked for without text.
+        let text = self.goal_content(path, id).unwrap_or_default();
         let mut guard = if wait {
             self.lock_session().await?
         } else {
@@ -614,19 +618,72 @@ impl Bridge {
                 .map_err(|_| "Agda is busy. Hover again in a moment.".to_string())?
         };
         Self::check_current(&guard, path)?;
-        let outcome = Outcome::collect(
-            self.run(&mut guard, &iotcm::goal_type_context(path, id))
-                .await?,
-        );
+        let request = match text.is_empty() {
+            true => iotcm::goal_type_context(path, id),
+            false => iotcm::goal_type_context_infer(path, id, &text),
+        };
+        let mut outcome = Outcome::collect(self.run(&mut guard, &request).await?);
+        // For text it cannot type, Agda answers only with the error: ask for
+        // the goal alone, and show the error after it.
+        let mut untyped = None;
+        if outcome.goal_info.is_none() && !text.is_empty() {
+            untyped = Some(outcome.errors.join("\n"));
+            outcome = Outcome::collect(
+                self.run(&mut guard, &iotcm::goal_type_context(path, id))
+                    .await?,
+            );
+        }
         drop(guard);
         match outcome.goal_info {
             Some((id, info)) => {
                 if let Some(document) = self.documents.lock().unwrap().get_mut(path) {
                     document.split_variables.insert(id, split_variables(&info));
                 }
-                Ok(render::goal(id, &info))
+                let mut markdown = render::goal(id, &info);
+                if let Some(message) = untyped {
+                    markdown.push_str(&render::untyped(&message));
+                }
+                Ok(markdown)
             }
             None => Err(outcome.errors.join("\n")),
+        }
+    }
+
+    /// The normal form of the text in goal `id`, in the output file.
+    pub async fn normal_form(&self, path: &Path, id: u32) -> Result<String, String> {
+        let text = self.goal_content(path, id)?;
+        if text.is_empty() {
+            return Err(format!(
+                "Type an expression in goal ?{id} first, then compute its normal form."
+            ));
+        }
+        let mut guard = self.lock_session().await?;
+        Self::check_current(&guard, path)?;
+        // Computing can take long, unlike the other goal commands.
+        let progress = self
+            .begin_progress(&format!("computing the normal form in ?{id}"))
+            .await;
+        let result = self.run(&mut guard, &iotcm::compute(path, id, &text)).await;
+        if let Some(progress) = progress {
+            progress.finish().await;
+        }
+        let outcome = Outcome::collect(result?);
+        drop(guard);
+        let title = format!("Normal form of ?{id}");
+        match &outcome.goal_info {
+            Some((id, GoalInfo::NormalForm { expr })) => {
+                self.show_output(&title, path, &render::normal_form(*id, Some(&text), expr))
+                    .await;
+                Ok(String::new())
+            }
+            _ => {
+                self.show_output(&title, path, &outcome.markdown()).await;
+                Err(outcome
+                    .errors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Agda gave no normal form.".into()))
+            }
         }
     }
 
@@ -1414,6 +1471,7 @@ impl LanguageServer for Backend {
                         COMMAND_GIVE.into(),
                         COMMAND_REFINE.into(),
                         COMMAND_GOAL.into(),
+                        COMMAND_NORMAL_FORM.into(),
                         COMMAND_CASE_SPLIT.into(),
                         COMMAND_AUTO.into(),
                         COMMAND_SOLVE.into(),
@@ -1823,6 +1881,12 @@ impl LanguageServer for Backend {
                 rewrite.clone(),
             ));
             actions.push(goal_action("Print goal in output", COMMAND_GOAL));
+            if !content.is_empty() {
+                actions.push(goal_action(
+                    "Print normal form in output",
+                    COMMAND_NORMAL_FORM,
+                ));
+            }
         }
         // Offered where output matters, not on every line, so Zed does not
         // show a code action indicator everywhere.
@@ -1879,6 +1943,7 @@ impl LanguageServer for Backend {
                 }
                 (COMMAND_SOLVE, Some(id)) => bridge.solve(&path, Some(id)).await,
                 (COMMAND_ADD_WITH, Some(id)) => bridge.add_with(&path, id).await,
+                (COMMAND_NORMAL_FORM, Some(id)) => bridge.normal_form(&path, id).await,
                 // For this command the number is a line, not a goal.
                 (COMMAND_ADD_CLAUSE, Some(line)) => bridge.add_clause(&path, line as usize).await,
                 (COMMAND_GOAL, Some(id)) => match bridge.goal_info(&path, id, true).await {

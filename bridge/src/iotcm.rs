@@ -68,6 +68,30 @@ pub fn goal_type_context(file: &Path, goal: u32) -> String {
     )
 }
 
+/// `Cmd_goal_type_context_infer <rewrite> <goal> noRange "<expr>"`: goal type
+/// and context, and the type of `expr` in the goal (Emacs's `C-c C-.`).
+pub fn goal_type_context_infer(file: &Path, goal: u32, expr: &str) -> String {
+    iotcm(
+        file,
+        &format!(
+            "Cmd_goal_type_context_infer Simplified {goal} noRange {}",
+            haskell_quote(expr)
+        ),
+    )
+}
+
+/// `Cmd_compute DefaultCompute <goal> noRange "<expr>"`: the normal form of
+/// `expr` in the goal (Emacs's `C-c C-n` without a prefix).
+pub fn compute(file: &Path, goal: u32, expr: &str) -> String {
+    iotcm(
+        file,
+        &format!(
+            "Cmd_compute DefaultCompute {goal} noRange {}",
+            haskell_quote(expr)
+        ),
+    )
+}
+
 /// `Cmd_give WithoutForce <goal> noRange "<expr>"`: fill a goal.
 pub fn give(file: &Path, goal: u32, expr: &str) -> String {
     iotcm(
@@ -193,6 +217,14 @@ mod tests {
             envelope(r#"Cmd_solveOne Simplified 5 noRange """#)
         );
         assert_eq!(solve_all(file), envelope("Cmd_solveAll AsIs"));
+        assert_eq!(
+            goal_type_context_infer(file, 2, "n + n"),
+            envelope(r#"Cmd_goal_type_context_infer Simplified 2 noRange "n + n""#)
+        );
+        assert_eq!(
+            compute(file, 1, "two + two"),
+            envelope(r#"Cmd_compute DefaultCompute 1 noRange "two + two""#)
+        );
         assert_eq!(
             why_in_scope_toplevel(file, "suc"),
             envelope(r#"Cmd_why_in_scope_toplevel "suc""#)

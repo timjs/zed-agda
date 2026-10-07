@@ -2,21 +2,27 @@
 //! `*Agda information*` buffer. Agda code goes in ```agda fences, so Zed
 //! highlights it with the Agda grammar in hovers and in Markdown previews.
 
-use crate::protocol::{DisplayInfo, GoalInfo, message_text};
+use crate::protocol::{DisplayInfo, GoalInfo, TypeAux, message_text};
 use serde_json::Value;
 
 const RULE: &str = "────────────────────────────────────────";
 
-/// Goal type and context, as `Cmd_goal_type_context` returns them.
+/// Goal type and context, as `Cmd_goal_type_context` returns them, with the
+/// type of the goal's text as `Have:` when `Cmd_goal_type_context_infer`
+/// asked for it, as in Emacs.
 pub fn goal(id: u32, info: &GoalInfo) -> String {
     match info {
         GoalInfo::GoalType {
             ty,
+            type_aux,
             entries,
             boundary,
             output_forms,
         } => {
             let mut out = format!("**Goal ?{id}**\n\n```agda\nGoal: {ty}\n");
+            if let TypeAux::GoalAndHave { expr } = type_aux {
+                out.push_str(&format!("Have: {expr}\n"));
+            }
             for value in boundary {
                 out.push_str(&format!("Boundary: {}\n", message_text(value)));
             }
@@ -39,10 +45,30 @@ pub fn goal(id: u32, info: &GoalInfo) -> String {
             out.push_str("```\n");
             out
         }
+        GoalInfo::NormalForm { expr } => normal_form(id, None, expr),
         GoalInfo::Other => format!(
             "**Goal ?{id}**\n\n(Agda sent goal information this version cannot show yet.)\n"
         ),
     }
+}
+
+/// Why the text in a goal has no type, to follow the goal and its context.
+pub fn untyped(message: &str) -> String {
+    format!("\nAgda cannot infer a type for the text in the goal:\n\n```text\n{message}\n```\n")
+}
+
+/// The normal form of the text in goal `id`, with that text when known, on
+/// one line.
+pub fn normal_form(id: u32, text: Option<&str>, normal: &str) -> String {
+    let of = text
+        .map(|text| {
+            format!(
+                " of `{}`",
+                text.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        })
+        .unwrap_or_default();
+    format!("**Normal form{of} in ?{id}**\n\n```agda\n{normal}\n```\n")
 }
 
 /// Agda's answer to why a name is in scope, tidied: in a file without goals,
@@ -124,6 +150,41 @@ fn section(out: &mut String, title: &str, items: impl Iterator<Item = String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ContextEntry;
+
+    #[test]
+    fn shows_the_type_of_a_goals_text_and_its_normal_form() {
+        let info = GoalInfo::GoalType {
+            ty: "ℕ".into(),
+            type_aux: TypeAux::GoalAndHave {
+                expr: "ℕ → ℕ".into(),
+            },
+            entries: vec![ContextEntry {
+                reified_name: "n".into(),
+                binding: "ℕ".into(),
+                in_scope: true,
+            }],
+            boundary: vec![],
+            output_forms: vec![],
+        };
+        assert_eq!(
+            goal(3, &info),
+            format!("**Goal ?3**\n\n```agda\nGoal: ℕ\nHave: ℕ → ℕ\n{RULE}\nn : ℕ\n```\n")
+        );
+        assert_eq!(
+            normal_form(1, Some("two\n  + two"), "suc (suc zero)"),
+            "**Normal form of `two + two` in ?1**\n\n```agda\nsuc (suc zero)\n```\n"
+        );
+        assert!(
+            goal(
+                1,
+                &GoalInfo::NormalForm {
+                    expr: "zero".into()
+                }
+            )
+            .starts_with("**Normal form in ?1**")
+        );
+    }
 
     #[test]
     fn says_when_agda_leaves_out_a_location() {

@@ -68,9 +68,9 @@ is Zed's place for a language server's own settings.
 `outputFile` is the Markdown file where Agda's answers appear (the equivalent
 of Emacs's `*Agda information*` buffer), relative to the project root. Add it
 to your `.gitignore`. It opens once by itself, in the pane you are editing;
-move it to a split. After closing it, reopen it with the code action "Agda:
-open output file" on a goal or an error, or with Zed's `pane: reopen closed
-item` (`cmd-shift-t` on macOS, `ctrl-shift-t` on Linux). With
+move it to a split. After closing it, reopen it with the code action `Open
+output file` on a goal or an error, or with Zed's `pane: reopen closed item`
+(`cmd-shift-t` on macOS, `ctrl-shift-t` on Linux). With
 `"reveal_if_open": true` in Zed's settings, the code action and the automatic
 opening reveal an output file that is already open in another pane, instead of
 opening a second copy.
@@ -94,11 +94,12 @@ seen yet (lines typed since the last save); `full` shows only Agda's.
 
 Opening or saving a file loads it in Agda. Goals then show their types as
 diagnostics, and a lone `?` becomes `{!  !}`. Hover shows a goal's type and
-context. Elsewhere, on a name that is in scope at the top level, in the file
-Agda loaded last, it shows the name's type (as `suc : ℕ → ℕ`), how to type
-it when it is a symbol, and why it is in scope: its definition, or the `open`
-that brought it in, with locations. The code actions (`cmd-.`
-on macOS, `ctrl-.` on Linux) are:
+context, and, when the goal has text, the type of that text (`Have:`, as
+Emacs's `C-c C-.`) or why Agda cannot type it. Elsewhere, on a name that is
+in scope at the top level, in the file Agda loaded last, it shows the name's
+type (as `suc : ℕ → ℕ`), how to type it when it is a symbol, and why it is
+in scope: its definition, or the `open` that brought it in, with locations.
+The code actions (`cmd-.` on macOS, `ctrl-.` on Linux) are:
 
 | Where | Code action | Effect |
 | --- | --- | --- |
@@ -109,6 +110,7 @@ on macOS, `ctrl-.` on Linux) are:
 | a goal with text | ``Case split on `x y` `` | split on the variables typed in the goal |
 | a goal that is a whole right-hand side | `With-abstract`, ``With-abstract on `e` `` | `f n = {! e !}` becomes `f n with e` and `... \| w = {!  !}` (as Idris's "add with") |
 | a goal | `Auto`, `Solve`, `Solve all goals` | proof search, or the solutions unification already found |
+| a goal with text | `Print normal form in output` | the normal form of the text, as Emacs's `C-c C-n` |
 | a goal or an error | `Print goal in output`, `Open output file` | the output file |
 
 New clauses, from `Make clause`, a case split or `With-abstract`, are loaded

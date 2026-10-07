@@ -2,7 +2,8 @@
 
 Phase 2 polishes what phase 1 ([`PHASE1.md`](PHASE1.md)) built, after using it
 every day: options for symbol input, clearer code actions, renaming, settings
-that change while Zed runs, the outline, `Make clause` and hover on symbols.
+that change while Zed runs, the outline, `Make clause`, hover on symbols and
+names, and the type and normal form of a goal's text.
 `PLAN.md` calls this phase "Polish". The sections follow the order in which
 the work was done.
 
@@ -485,6 +486,78 @@ suc is in scope as
 | A line without the location of an `open` says so | passes |
 | End to end: `ℕ` shows its type, how to type it and that it is defined at `Spike.agda:3.6-7`, in that order; `_+_` from its `+`, with a relative path; `suc` in `Uses.agda` came in with the opening of `Nat` and is defined at `Nat.agda:5.3-6`; no code action for it any more | passes |
 
+## Done: the goal's type with the type of its text
+
+Hover on a goal with text, and `Print goal in output`, show the type of that
+text right below the goal's type, as `Have:`, the way Emacs's `C-c C-.` does:
+
+````markdown
+**Goal ?0**
+
+```agda
+Goal: ℕ
+Have: ℕ
+────────────────────────────────────────
+n : ℕ
+m : ℕ
+```
+````
+
+1. **Agda's answer.** `Cmd_goal_type_context_infer Simplified <goal> noRange
+   "<text>"` answers (checked with Agda 2.8.0) as `Cmd_goal_type_context`
+   does, with one field more: `typeAux` is
+   `{"kind": "GoalAndHave", "expr": "ℕ"}`, or `{"kind": "GoalOnly"}` for empty
+   text. The command, `Simplified` and the place of `Have:` are those of
+   Emacs's `agda2-goal-and-context-and-inferred` (`agda2-mode.el`, shipped
+   with Agda).
+2. **In hover, not a code action.** The plan had a code action with the
+   answer in the output file. It costs one command, as the goal's hover
+   already did, and why a name is in scope went into hover too, so hover
+   shows it. An empty goal is asked as before (`Cmd_goal_type_context`).
+3. **Text Agda cannot type**, such as a name that is not in scope or text
+   typed halfway, gets only an error from Agda. The bridge then asks for the
+   goal alone, and shows the error below it. Its positions (`1.1-5`) are in
+   the goal's text, not in the file.
+4. **Scope.** The text is checked in the goal's scope, which has only what
+   is defined above the goal: in `Goals.agda`, `id` is not in scope in the
+   goal of `_+_`, which comes first.
+
+| Check | Result |
+| --- | --- |
+| Agda's `GoalAndHave` and `GoalOnly` answers are read; the command is built; `Have:` comes right below `Goal:` | passes |
+| End to end: `Have: ℕ` on `{! suc (n + m) !}` in `Spike.agda` and on `{! id (suc x) !}` in `Goals.agda`; no `Have:` on an empty goal; on `{! nope !}` the goal, its context and Agda's "Not in scope" | passes; fails when the bridge asks without the text, or does not ask for the goal alone after an error |
+
+## Done: the normal form of a goal's text
+
+On a goal with text, the code action `Print normal form in output` writes the
+normal form of that text to the output file:
+
+````markdown
+**Normal form of `id (suc x)` in ?3**
+
+```agda
+suc x
+```
+````
+
+1. **Agda's answer.** `Cmd_compute DefaultCompute <goal> noRange "<text>"`
+   answers (checked with Agda 2.8.0) with a `GoalSpecific` of the kind
+   `NormalForm`, with the normal form in `expr`. `DefaultCompute` is what
+   Emacs's `C-c C-n` sends without a prefix (`agda2-compute-normalised` in
+   `agda2-mode.el`); with a prefix it sends `IgnoreAbstract`,
+   `UseShowInstance` or `HeadCompute`, which the bridge does not offer.
+2. **A code action, not hover.** Unlike a type, a normal form can take long
+   to compute (a large number in unary, say), and the bridge cannot abort
+   Agda, which meanwhile does nothing else, not even a load. So it is only
+   computed when asked, with a progress message in Zed's status bar,
+   "computing the normal form in ?3".
+3. **Errors** go to the output file and a notification, as for give.
+
+| Check | Result |
+| --- | --- |
+| Agda's `NormalForm` answer is read; the command is built; the output names the text on one line | passes |
+| End to end: offered on goals with text only; for `id (suc x)` a progress message, and `suc x` in the output file | passes; fails when the action is offered on an empty goal |
+
 ## Next steps
 
 Still to do in this phase:
@@ -494,13 +567,7 @@ Still to do in this phase:
    expression over its free variables (`Cmd_helper_function`); the bridge
    adds that signature, and a clause for it, above the definition the goal is
    in, and calls it in the goal.
-2. **The goal's type with the type of its expression**, as a code action on a
-   goal with an expression, with Agda's answer in the output file
-   (`Cmd_goal_type_context_infer`): the goal's type and context, and the type
-   of what is typed in it, to compare the two.
-3. **The normal form of the goal's expression**, as a code action on a goal
-   with an expression, with the answer in the output file (`Cmd_compute`).
-4. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
+2. Before publishing: an issue at `haohanyang/agda-zed`, proposing the bridge
    or asking to take over the `agda` id.
 
 The hover cache moved to phase 3, optimisations ([`PHASE3.md`](PHASE3.md)).

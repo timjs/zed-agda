@@ -347,7 +347,14 @@ fn drives_agda_through_lsp_and_debug_client() {
     );
     let hover = client.hover(&spike_uri, position_of(&text, "{!   !}", 1));
     assert!(
-        hover.contains("Goal: 𝔹") && hover.contains("b : 𝔹"),
+        hover.contains("Goal: 𝔹") && hover.contains("b : 𝔹") && !hover.contains("Have:"),
+        "{hover}"
+    );
+    // On a hole with text, also the type of that text.
+    let hover = client.hover(&spike_uri, position_of(&text, "suc (n", 0));
+    assert!(
+        hover.starts_with("**Goal ?0**\n\n```agda\nGoal: ℕ\nHave: ℕ\n")
+            && hover.ends_with("\nn : ℕ\nm : ℕ\n```\n"),
         "{hover}"
     );
     assert_eq!(
@@ -415,6 +422,7 @@ fn drives_agda_through_lsp_and_debug_client() {
             "Solve",
             "Solve all goals",
             "Print goal in output",
+            "Print normal form in output",
             "Open output file"
         ]
     );
@@ -1058,9 +1066,57 @@ fn goal_commands() {
             "Solve",
             "Solve all goals",
             "Print goal in output",
+            "Print normal form in output",
             "Open output file"
         ]
     );
+
+    // The type of a goal's text, and its normal form, in goal 3 of
+    // `f = λ { x → {! x !} }`, where `id` is in scope (in goal 0 it is not:
+    // it is defined further down).
+    let output = root.join(".zed/agda-output.md");
+    let with_text = text.replace("{! x !}", "{! id (suc x) !}");
+    version += 1;
+    change(&mut client, &with_text, version);
+    let hover = client.hover(&goals_uri, position_of(&with_text, "id (suc x)", 0));
+    assert!(
+        hover.contains("Goal: ℕ\nHave: ℕ\n") && hover.ends_with("\nx : ℕ\n```\n"),
+        "{hover}"
+    );
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": "agda.normalForm", "arguments": [goals_uri, 3] }),
+    );
+    // Computing shows progress, which Zed is asked to create first.
+    let end = client.wait_for("progress", |m| {
+        m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"
+    });
+    let begin = client.history.iter().rev().find(|m| {
+        m["method"] == "$/progress"
+            && m["params"]["token"] == end["params"]["token"]
+            && m["params"]["value"]["kind"] == "begin"
+    });
+    assert_eq!(
+        begin.unwrap()["params"]["value"]["message"],
+        "computing the normal form in ?3"
+    );
+    let normal = "**Normal form of `id (suc x)` in ?3**\n\n```agda\nsuc x\n```\n";
+    let written = wait_for_output(&output, normal);
+    assert!(written.contains(normal), "{written}");
+    // Text Agda cannot type: the goal and its context, then why.
+    let untyped = text.replace("{! x !}", "{! nope !}");
+    version += 1;
+    change(&mut client, &untyped, version);
+    let hover = client.hover(&goals_uri, position_of(&untyped, "nope", 0));
+    assert!(
+        hover.contains("Goal: ℕ\n")
+            && !hover.contains("Have:")
+            && hover.contains("x : ℕ\n```\n\nAgda cannot infer a type for the text in the goal:\n\n```text\n1.1-5: error: [NotInScope]\nNot in scope:\n  nope at 1.1-5"),
+        "{hover}"
+    );
+    version += 1;
+    change(&mut client, &text, version);
 
     // Run a goal command and return the edits Zed is asked to apply.
     let run = |client: &mut Client, command: &str, arguments: Value| -> Vec<Value> {
@@ -1161,7 +1217,9 @@ fn goal_commands() {
     assert!(
         titles.contains(&"Case split on `m`".to_string())
             && titles.contains(&"Case split on result".to_string())
-            && !titles.iter().any(|t| t == "Give"),
+            && !titles
+                .iter()
+                .any(|t| t == "Give" || t == "Print normal form in output"),
         "{titles:?}"
     );
     let edits = run(&mut client, "agda.caseSplit", json!([goals_uri, 0, "m"]));
