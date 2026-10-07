@@ -55,6 +55,71 @@ pub fn goal(id: u32, info: &GoalInfo) -> String {
     }
 }
 
+/// Agda's answer about a goal: its type and context, and, for text in the
+/// goal, the type of that text or why there is none.
+#[derive(Debug, Clone)]
+pub struct GoalAnswer {
+    /// The goal's text when Agda was asked, which `Have:` is about.
+    pub text: String,
+    pub info: GoalInfo,
+    /// Why Agda cannot type that text.
+    pub untyped: Option<String>,
+}
+
+impl GoalAnswer {
+    pub fn markdown(&self, id: u32) -> String {
+        let mut out = goal(id, &self.info);
+        if let Some(message) = &self.untyped {
+            out.push_str(&untyped(message));
+        }
+        out
+    }
+}
+
+/// What hover says when Agda is busy and nothing is known about the goal.
+pub const BUSY: &str = "Agda is busy. Hover again in a moment.";
+
+/// What hover shows about goal `id`, with `text` in it, while Agda stays
+/// busy: Agda's last answer, without `Have:` when that was about other text,
+/// or else the goal's type `ty` from the last load; then what is missing, or,
+/// while Agda loads the file again (`reloading`), that it is from before.
+pub fn goal_while_busy(
+    id: u32,
+    answer: Option<&GoalAnswer>,
+    ty: Option<&str>,
+    text: &str,
+    reloading: bool,
+) -> String {
+    let (shown, missing) = match (answer, ty) {
+        (Some(answer), _) if answer.text == text => (answer.markdown(id), None),
+        (Some(answer), _) => {
+            let mut info = answer.info.clone();
+            if let GoalInfo::GoalType { type_aux, .. } = &mut info {
+                *type_aux = TypeAux::GoalOnly;
+            }
+            let missing = (!text.is_empty()).then_some("the type of the goal's text");
+            (goal(id, &info), missing)
+        }
+        (None, Some(ty)) => {
+            let missing = match text.is_empty() {
+                true => "the context",
+                false => "the context and the type of the goal's text",
+            };
+            (
+                format!("**Goal ?{id}**\n\n```agda\nGoal: {ty}\n```\n"),
+                Some(missing),
+            )
+        }
+        (None, None) => return BUSY.to_string(),
+    };
+    let note = match (reloading, missing) {
+        (true, _) => "Agda is loading the file again: this is from the last load.".to_string(),
+        (false, Some(missing)) => format!("Agda is busy: {missing} follows when it is free."),
+        (false, None) => return shown,
+    };
+    format!("{shown}\n*{note}*\n")
+}
+
 /// Why the text in a goal has no type, to follow the goal and its context.
 pub fn untyped(message: &str) -> String {
     format!("\nAgda cannot infer a type for the text in the goal:\n\n```text\n{message}\n```\n")
@@ -187,6 +252,61 @@ mod tests {
             )
             .starts_with("**Normal form in ?1**")
         );
+    }
+
+    #[test]
+    fn shows_what_is_known_while_agda_is_busy() {
+        let info = GoalInfo::GoalType {
+            ty: "ℕ".into(),
+            type_aux: TypeAux::GoalAndHave {
+                expr: "ℕ → ℕ".into(),
+            },
+            entries: vec![ContextEntry {
+                reified_name: "n".into(),
+                binding: "ℕ".into(),
+                in_scope: true,
+            }],
+            boundary: vec![],
+            output_forms: vec![],
+        };
+        let answer = GoalAnswer {
+            text: "suc".into(),
+            info,
+            untyped: None,
+        };
+        let full = answer.markdown(3);
+        assert!(full.contains("Have: ℕ → ℕ\n"), "{full}");
+        // The answer for this text, whole; only while loading with a note.
+        assert_eq!(goal_while_busy(3, Some(&answer), None, "suc", false), full);
+        assert_eq!(
+            goal_while_busy(3, Some(&answer), None, "suc", true),
+            format!("{full}\n*Agda is loading the file again: this is from the last load.*\n")
+        );
+        // For other text, without `Have:`; for no text that is all of it.
+        let other = goal_while_busy(3, Some(&answer), Some("ℕ"), "suc n", false);
+        assert!(
+            !other.contains("Have:")
+                && other.contains("n : ℕ")
+                && other.ends_with(
+                    "\n*Agda is busy: the type of the goal's text follows when it is free.*\n"
+                ),
+            "{other}"
+        );
+        let empty = goal_while_busy(3, Some(&answer), Some("ℕ"), "", false);
+        assert!(
+            !empty.contains("Have:") && !empty.contains("*Agda"),
+            "{empty}"
+        );
+        // Without an answer, the type from the load.
+        assert_eq!(
+            goal_while_busy(3, None, Some("ℕ"), "", false),
+            "**Goal ?3**\n\n```agda\nGoal: ℕ\n```\n\n*Agda is busy: the context follows when it is free.*\n"
+        );
+        assert!(
+            goal_while_busy(3, None, Some("ℕ"), "suc", false)
+                .contains("the context and the type of the goal's text follows")
+        );
+        assert_eq!(goal_while_busy(3, None, None, "", false), BUSY);
     }
 
     #[test]

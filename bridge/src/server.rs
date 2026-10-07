@@ -103,8 +103,12 @@ struct Document {
     problems: Vec<Diagnostic>,
     /// The text Agda last loaded, to skip reloading identical text.
     loaded_text: Option<String>,
-    /// The variables a goal's context offers for a case split, once known.
-    split_variables: HashMap<u32, Vec<String>>,
+    /// Agda's answers about goals since the last load, cleared also when a
+    /// goal command fills a goal, which can change the others.
+    goal_answers: HashMap<u32, render::GoalAnswer>,
+    /// Whether Agda is loading this file again, so that its answers are from
+    /// the load before.
+    reloading: bool,
     /// What Agda said about names hovered since the last load.
     names: HashMap<String, NameInfo>,
     /// When Agda last checked this text, to tell whether links into another
@@ -539,6 +543,7 @@ impl Bridge {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        self.set_reloading(path, true);
         let progress = self.begin_progress(&format!("checking {name}")).await;
         let result = self
             .run(&mut guard, &iotcm::load(path, &self.settings().extra_args))
@@ -546,7 +551,13 @@ impl Bridge {
         if let Some(progress) = progress {
             progress.finish().await;
         }
-        let outcome = Outcome::collect(result?);
+        let outcome = match result {
+            Ok(responses) => Outcome::collect(responses),
+            Err(message) => {
+                self.set_reloading(path, false);
+                return Err(message);
+            }
+        };
         if let Some(session) = guard.as_mut() {
             session.current_file = Some(path.to_path_buf());
             session.helper_made = false;
@@ -614,7 +625,8 @@ impl Bridge {
             document.problems = problems;
             document.loaded_text = Some(snapshot);
             document.loaded_at = Some(std::time::Instant::now());
-            document.split_variables.clear();
+            document.goal_answers.clear();
+            document.reloading = false;
             document.names.clear();
             if opened {
                 document.expand_question_marks()
@@ -640,17 +652,32 @@ impl Bridge {
     }
 
     /// Goal type and context, rendered as Markdown, and, when the goal has
-    /// text, the type of that text (`Have:`). With `wait` false, wait only
-    /// briefly when Agda is busy (see [`Bridge::lock_briefly`]).
+    /// text, the type of that text (`Have:`): Agda's answer since the last
+    /// load for the goal's current text, or else asked from Agda and kept.
+    /// With `wait` false, wait only briefly when Agda is busy (see
+    /// [`Bridge::lock_briefly`]), and then show what is known.
     pub async fn goal_info(&self, path: &Path, id: u32, wait: bool) -> Result<String, String> {
         // A goal that is no longer in the buffer is asked for without text.
         let text = self.goal_content(path, id).unwrap_or_default();
+        let known = self
+            .documents
+            .lock()
+            .unwrap()
+            .get(path)
+            .and_then(|document| {
+                let answer = document.goal_answers.get(&id)?;
+                (!document.reloading && answer.text == text).then(|| answer.markdown(id))
+            });
+        if let Some(markdown) = known {
+            return Ok(markdown);
+        }
         let mut guard = if wait {
             self.lock_session().await?
         } else {
-            self.lock_briefly()
-                .await
-                .ok_or("Agda is busy. Hover again in a moment.")?
+            match self.lock_briefly().await {
+                Some(guard) => guard,
+                None => return Ok(self.goal_while_busy(path, id, &text)),
+            }
         };
         Self::check_current(&guard, path)?;
         let request = match text.is_empty() {
@@ -668,19 +695,45 @@ impl Bridge {
                     .await?,
             );
         }
-        drop(guard);
         match outcome.goal_info {
             Some((id, info)) => {
+                let answer = render::GoalAnswer {
+                    text,
+                    info,
+                    untyped,
+                };
+                let markdown = answer.markdown(id);
+                // Kept before Agda is free for a command that fills a goal,
+                // which then clears the answers.
                 if let Some(document) = self.documents.lock().unwrap().get_mut(path) {
-                    document.split_variables.insert(id, split_variables(&info));
+                    document.goal_answers.insert(id, answer);
                 }
-                let mut markdown = render::goal(id, &info);
-                if let Some(message) = untyped {
-                    markdown.push_str(&render::untyped(&message));
-                }
+                drop(guard);
                 Ok(markdown)
             }
             None => Err(outcome.errors.join("\n")),
+        }
+    }
+
+    /// What hover shows about goal `id`, with `text` in it, while Agda stays
+    /// busy (see [`render::goal_while_busy`]).
+    fn goal_while_busy(&self, path: &Path, id: u32, text: &str) -> String {
+        let documents = self.documents.lock().unwrap();
+        match documents.get(path) {
+            Some(document) => render::goal_while_busy(
+                id,
+                document.goal_answers.get(&id),
+                document.goal_types.get(&id).map(String::as_str),
+                text,
+                document.reloading,
+            ),
+            None => render::BUSY.to_string(),
+        }
+    }
+
+    fn set_reloading(&self, path: &Path, reloading: bool) {
+        if let Some(document) = self.documents.lock().unwrap().get_mut(path) {
+            document.reloading = reloading;
         }
     }
 
@@ -763,25 +816,23 @@ impl Bridge {
         Some(info)
     }
 
-    /// The variables of goal `id` to offer for a case split: from the cache,
-    /// or asked from Agda, waiting only briefly when it is busy.
+    /// The variables of goal `id` to offer for a case split: from Agda's
+    /// answer about the goal, asked when there is none yet, waiting only
+    /// briefly when Agda is busy.
     async fn goal_split_variables(&self, path: &Path, id: u32) -> Vec<String> {
-        let cached = self
-            .documents
-            .lock()
-            .unwrap()
-            .get(path)
-            .and_then(|document| document.split_variables.get(&id).cloned());
-        if let Some(variables) = cached {
+        let known = || {
+            self.documents
+                .lock()
+                .unwrap()
+                .get(path)
+                .and_then(|document| document.goal_answers.get(&id))
+                .map(|answer| split_variables(&answer.info))
+        };
+        if let Some(variables) = known() {
             return variables;
         }
         let _ = self.goal_info(path, id, false).await;
-        self.documents
-            .lock()
-            .unwrap()
-            .get(path)
-            .and_then(|document| document.split_variables.get(&id).cloned())
-            .unwrap_or_default()
+        known().unwrap_or_default()
     }
 
     /// The text typed in a goal, trimmed.
@@ -816,7 +867,16 @@ impl Bridge {
             GoalCommand::Refine => iotcm::refine(path, id, &expression),
             GoalCommand::Auto => iotcm::auto_one(path, id, &expression),
         };
-        let outcome = Outcome::collect(self.run(&mut guard, &request).await?);
+        let mut outcome = Outcome::collect(self.run(&mut guard, &request).await?);
+        // Auto sends no new list of goals, though filling one goal can change
+        // the types of others: ask for it, as Emacs's "show goals" does.
+        if outcome.give.is_some() && !outcome.goals_listed {
+            let goals = Outcome::collect(self.run(&mut guard, &iotcm::metas(path)).await?);
+            if goals.goals_listed {
+                outcome.goal_types = goals.goal_types;
+                outcome.goals_listed = true;
+            }
+        }
         drop(guard);
 
         let title = command.title();
@@ -882,6 +942,8 @@ impl Bridge {
             } else {
                 document.goal_types.remove(&given);
             }
+            // Filling a goal can change the types in others.
+            document.goal_answers.clear();
             edit
         };
         self.apply_edits(path, vec![edit]).await?;

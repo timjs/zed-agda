@@ -1357,54 +1357,197 @@ fn cancelled_requests_leave_no_answers_behind() {
 }
 
 #[test]
-fn hover_waits_briefly_for_agda() {
+fn hover_while_agda_is_busy() {
     let Some(agda) = find_agda() else {
         eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
         return;
     };
-    let root = setup("brief-wait", &["Slow.agda"]);
+    let root = setup("busy", &["Slow.agda"]);
     let mut client = Client::start(&root.join("bridge.sock"));
     client.initialize(&root, &agda);
     let file = root.join("Slow.agda");
+    let file_uri = uri(&file);
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": file_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    client.diagnostics(&file_uri, |d| d.len() == 3);
+    let quick = position_of(&text, "{!  !}", 0);
+    let other = position_of(&text, "{!  !}", 1);
+    let expected = client.hover(&file_uri, quick.clone());
+    assert!(expected.contains("n : ℕ"), "{expected}");
+
+    // The normal form of `ack three eight` keeps Agda busy for seconds.
+    let busy = |client: &mut Client| {
+        client.received.clear();
+        client.request(
+            "workspace/executeCommand",
+            json!({ "command": "agda.normalForm", "arguments": [uri(&file), 0] }),
+        );
+        client.wait_for("progress", |m| {
+            m["method"] == "$/progress" && m["params"]["value"]["kind"] == "begin"
+        });
+    };
+    let ended = |m: &Value| m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end";
+    let timed = |client: &mut Client, at: &Value| {
+        let start = std::time::Instant::now();
+        let hover = client.hover(&uri(&file), at.clone());
+        (hover, start.elapsed())
+    };
+
+    busy(&mut client);
+    // A goal hovered before shows Agda's answer at once.
+    let (hover, waited) = timed(&mut client, &quick);
+    assert_eq!(hover, expected);
+    assert!(waited < Duration::from_millis(500), "{waited:?}");
+    // One not hovered yet waits a second, then shows its type from the load.
+    let (hover, waited) = timed(&mut client, &other);
+    assert_eq!(
+        hover,
+        "**Goal ?2**\n\n```agda\nGoal: ℕ\n```\n\n*Agda is busy: the context follows when it is free.*\n"
+    );
+    assert!(waited >= Duration::from_millis(950), "{waited:?}");
+    assert!(!client.received.iter().any(ended), "Agda was done first");
+    client.wait_for("progress", ended);
+    assert!(client.hover(&file_uri, other).contains("m : ℕ"));
+
+    // With other text in it, a goal hovered before waits a second, then
+    // shows Agda's answer without `Have:`, which is about the old text.
+    text = text.replacen("quick n = {!  !}", "quick n = {! n !}", 1);
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": file_uri, "version": 2 },
+                "contentChanges": [{ "text": text }] }),
+    );
+    busy(&mut client);
+    let (hover, waited) = timed(&mut client, &quick);
+    assert!(
+        hover.contains("n : ℕ")
+            && !hover.contains("Have:")
+            && hover.ends_with(
+                "\n*Agda is busy: the type of the goal's text follows when it is free.*\n"
+            ),
+        "{hover}"
+    );
+    assert!(waited >= Duration::from_millis(950), "{waited:?}");
+    assert!(!client.received.iter().any(ended), "Agda was done first");
+    client.wait_for("progress", ended);
+    assert!(client.hover(&file_uri, quick).contains("Have: ℕ"));
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn hover_while_agda_loads_again() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("reload", &["SlowLoad.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize(&root, &agda);
+    let file = root.join("SlowLoad.agda");
     let file_uri = uri(&file);
     let text = std::fs::read_to_string(&file).unwrap();
     client.notify(
         "textDocument/didOpen",
         json!({ "textDocument": { "uri": file_uri, "languageId": "agda", "version": 1, "text": text } }),
     );
-    client.diagnostics(&file_uri, |d| d.len() == 2);
-    let quick = position_of(&text, "{!  !}", 0);
-    let expected = client.hover(&file_uri, quick.clone());
+    client.diagnostics(&file_uri, |d| d.len() == 1);
+    let goal = position_of(&text, "{!  !}", 0);
+    let expected = client.hover(&file_uri, goal.clone());
     assert!(expected.contains("n : ℕ"), "{expected}");
 
-    // The normal form of `ack three eight` keeps Agda busy for seconds. A
-    // hover meanwhile waits for it a second, then says Agda is busy; once
-    // Agda is done, it shows the goal again.
+    // Loading this file takes seconds, for `ack 3 8 ≡ 2045`. Meanwhile, after
+    // a second, hover shows Agda's answer from the last load, and says so.
+    let changed = format!("{text}\n-- changed\n");
+    std::fs::write(&file, &changed).unwrap();
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": file_uri, "version": 2 },
+                "contentChanges": [{ "text": changed }] }),
+    );
     client.received.clear();
-    client.request(
-        "workspace/executeCommand",
-        json!({ "command": "agda.normalForm", "arguments": [file_uri, 0] }),
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": file_uri } }),
     );
     client.wait_for("progress", |m| {
         m["method"] == "$/progress" && m["params"]["value"]["kind"] == "begin"
     });
     let start = std::time::Instant::now();
-    let hover = client.hover(&file_uri, quick.clone());
+    let hover = client.hover(&file_uri, goal.clone());
     let waited = start.elapsed();
-    assert_eq!(hover, "Agda is busy. Hover again in a moment.");
+    assert_eq!(
+        hover,
+        format!("{expected}\n*Agda is loading the file again: this is from the last load.*\n")
+    );
     assert!(waited >= Duration::from_millis(950), "{waited:?}");
-    // Agda was still busy when the hover gave up.
     assert!(
         !client
             .received
             .iter()
             .any(|m| m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"),
-        "Agda was done before the hover gave up"
+        "Agda was done first"
     );
-    client.wait_for("progress", |m| {
-        m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"
-    });
-    assert_eq!(client.hover(&file_uri, quick), expected);
+    // After the load, Agda's new answer, without the note.
+    client.diagnostics(&file_uri, |d| d.len() == 1);
+    assert_eq!(client.hover(&file_uri, goal), expected);
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn goal_types_follow_auto() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("follow-auto", &["Depends.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize(&root, &agda);
+    let file = root.join("Depends.agda");
+    let file_uri = uri(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": file_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    // The type of ?1 is a meta that ?0 will solve, such as `_B_11`.
+    let diagnostics = client.diagnostics(&file_uri, |d| d.len() == 2);
+    let goals = messages(&diagnostics, 3);
+    assert!(
+        goals[0] == "?0 : Set" && goals[1].starts_with("?1 : _"),
+        "{goals:?}"
+    );
+    let hover = client.hover(&file_uri, position_of(&text, "{!  !}", 1));
+    assert!(hover.contains("Goal: _"), "{hover}");
+
+    // Auto fills ?0 with `ℕ`, which Agda sends no new list of goals for;
+    // the diagnostic and the hover of ?1 follow anyway.
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": "agda.auto", "arguments": [file_uri, 0] }),
+    );
+    let edit = client.wait_for("applyEdit", |m| m["method"] == "workspace/applyEdit");
+    let edits = edit["params"]["edit"]["changes"][&file_uri]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(edits[0]["newText"], "ℕ");
+    let text = apply_all(&text, &edits);
+    let diagnostics = client.diagnostics(&file_uri, |d| d.len() == 1);
+    assert_eq!(messages(&diagnostics, 3), ["?1 : ℕ"]);
+    let hover = client.hover(&file_uri, position_of(&text, "{!  !}", 0));
+    assert!(hover.contains("Goal: ℕ"), "{hover}");
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

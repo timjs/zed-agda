@@ -175,6 +175,12 @@ pub fn why_in_scope_toplevel(file: &Path, name: &str) -> String {
     )
 }
 
+/// `Cmd_metas AsIs`: all goals with their types, as a load lists them
+/// (Emacs's "show goals", which also asks `AsIs`).
+pub fn metas(file: &Path) -> String {
+    iotcm(file, "Cmd_metas AsIs")
+}
+
 /// `Cmd_solveAll AsIs`: the solutions of all goals that unification already
 /// found.
 pub fn solve_all(file: &Path) -> String {
@@ -230,6 +236,7 @@ mod tests {
             envelope(r#"Cmd_solveOne Simplified 5 noRange """#)
         );
         assert_eq!(solve_all(file), envelope("Cmd_solveAll AsIs"));
+        assert_eq!(metas(file), envelope("Cmd_metas AsIs"));
         assert_eq!(
             goal_type_context_infer(file, 2, "n + n"),
             envelope(r#"Cmd_goal_type_context_infer Simplified 2 noRange "n + n""#)

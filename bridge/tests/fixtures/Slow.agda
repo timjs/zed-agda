@@ -20,3 +20,6 @@ slow = {! ack three eight !}
 
 quick : ℕ → ℕ
 quick n = {!  !}
+
+other : ℕ → ℕ
+other m = {!  !}

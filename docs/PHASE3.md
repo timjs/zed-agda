@@ -48,11 +48,11 @@ nothing. Each cause below was reproduced in an end-to-end test against Agda
    and a code action request for every cursor move, which on an empty goal
    asks Agda for the variables to split. Zed then keeps that popover while
    the mouse stays in the goal (`same_info_hover`). Hover now waits a
-   moment, see below; a longer command is for the goal cache.
+   moment, and after that shows what it has; see below.
 4. **Goals are asked every time.** A name is asked once per load; a goal on
    every hover. With Agda free, in `Spike.agda`, both take under 1 ms (a
    name from the cache 0.13 ms), so this matters in large files with large
-   contexts, not in small ones.
+   contexts, not in small ones. Fixed with a goal cache, see below.
 
 ## Done: hover in the blank middle of an empty goal
 
@@ -104,16 +104,55 @@ load still wait as long as needed, as before.
 | End to end: the 14 cancelled hovers of the previous step, now with every next hover answered at once, without hovering again when Agda was busy | passes; with the old code the first hover after a cancel says "Agda is busy", in three runs out of three |
 | End to end: while Agda computes the normal form of `ack three eight` (about 2.5 s, fixture `Slow.agda`), a hover on another goal says "Agda is busy" after a second, while Agda is still busy; afterwards it shows the goal | passes; with the old code the hover gives up after 0.2 ms, in three runs out of three |
 
-## Planned
+## Done: a goal cache
 
-1. **A goal cache** (causes 3 and 4). Per goal, what is known about it: after
-   a load only its type (which the bridge keeps for the diagnostics), after
-   the first hover the whole answer, for a goal with text together with that
-   text. Hover shows it at once, and while Agda is busy shows what it has,
-   the type at least. A load, give, refine, solve or auto clears it, since
-   filling one goal can change the types in others; the variables offered
-   for a case split come from it too. After auto, which sends no new list of
-   goals, the bridge asks for one (`Cmd_metas AsIs`, Emacs's "show goals"),
-   so that the stored types, and the goal diagnostics, stay current: without
-   it, a goal of type `_B_11` keeps that type after auto fills the goal it
-   depends on with `ℕ` (checked with Agda 2.8.0.2).
+Per goal, the bridge keeps Agda's answer (`render::GoalAnswer`): the goal's
+type and context, and, for a goal with text, the type of that text or why
+there is none, together with that text.
+
+1. **Hover** on a goal shows the kept answer at once when the goal's text is
+   the same, without Agda; otherwise it asks Agda, waiting at most a second,
+   and keeps the answer. `Print goal in output` uses it the same way, and the
+   code actions take the variables to split from it, so their own cache is
+   gone.
+2. **While Agda stays busy,** hover shows what is known, and in italics what
+   is missing:
+   - Agda's answer for other text in the goal, without `Have:`: "Agda is
+     busy: the type of the goal's text follows when it is free."
+   - Otherwise the goal's type from the last load, which the bridge keeps for
+     the diagnostics: "Agda is busy: the context follows when it is free."
+   - While Agda loads the file again, also the answer for the same text,
+     which is then from before: "Agda is loading the file again: this is
+     from the last load."
+
+   Only for a goal that Agda has said nothing about does hover still say
+   "Agda is busy".
+3. **Cleared** by a load, and when a goal command fills a goal (give,
+   refine, solve, auto), since that can change the types in other goals and
+   in their contexts. A case split, a with-abstraction or a helper function
+   changes nothing in Agda until the next load.
+4. **After auto,** which sends no new list of goals, the bridge asks for one
+   (`Cmd_metas AsIs`, Emacs's "show goals"), so that the stored types, and
+   the goal diagnostics, stay current. Without it, a goal of type `_B_11`
+   kept that type after auto filled the goal it depends on with `ℕ` (checked
+   with Agda 2.8.0.2).
+5. **No answer from before a give.** A hover keeps its answer while it still
+   holds Agda, so a give cannot come between Agda's answer and keeping it.
+
+| Check | Result |
+| --- | --- |
+| Unit: what is shown while Agda is busy: the whole answer, with the note only while loading; without `Have:` for other text, and complete for a goal without text; the type from the load; nothing known | passes |
+| End to end (`Slow.agda`): while Agda computes a normal form, a goal hovered before shows its answer at once (under 0.5 s); one not hovered yet shows, after a second, its type from the load with the note; with other text in it, a goal hovered before shows, after a second, its answer without `Have:`; afterwards Agda's answers | passes |
+| End to end (`SlowLoad.agda`, whose load checks `ack 3 8 ≡ 2045` twice, about 2.6 s): during a new load, after a second, the answer from before with the note; after the load, the new answer | passes |
+| End to end (`Depends.agda`): after auto fills `?0` with `ℕ`, the diagnostic and the hover of `?1` say `ℕ` instead of the meta | passes |
+| Seven mutations: no cache hit; a cache that ignores the text; no clearing after a give; no `Cmd_metas` after auto; no fallback while busy; the reload flag ignored, or never set | each fails at least one of these tests |
+
+## Possible next steps
+
+- **Ask for every goal after a load**, in the background, so that even the
+  first hover on a goal is instant. It costs Agda one command per goal after
+  every save.
+- **Stop a long command,** such as a normal form that takes too long, with
+  Agda's `Cmd_abort`, so that hovers get Agda's answers again at once. Not
+  checked yet: whether Agda 2.8 handles it while it works on another
+  command.

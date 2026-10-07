@@ -101,7 +101,8 @@ other type is a data type Agda only says when it splits. The context is asked
 once per goal, only when Agda is not busy, and kept until the next load; a
 hover on the goal fills it too. With variables typed in the goal, the one
 action splits on those, as before. (Since phase 3, a busy Agda is waited for
-at most a second; see [`PHASE3.md`](PHASE3.md).)
+at most a second, and the context comes from the goal cache, which a give
+also clears; see [`PHASE3.md`](PHASE3.md).)
 
 ### The comment after a case split
 

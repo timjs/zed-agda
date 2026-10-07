@@ -99,7 +99,10 @@ Emacs's `C-c C-.`) or why Agda cannot type it. Elsewhere, on a name that is
 in scope at the top level, in the file Agda loaded last, it shows the name's
 type (as `suc : ℕ → ℕ`), how to type it when it is a symbol, and why it is
 in scope: its definition, or the `open` that brought it in, with locations.
-The code actions (`cmd-.` on macOS, `ctrl-.` on Linux) are:
+Agda's answers are kept until the next load, so hovering again is instant.
+When Agda is busy for more than a second, as during a load, hover shows what
+it has and says what follows. The code actions (`cmd-.` on macOS, `ctrl-.`
+on Linux) are:
 
 | Where | Code action | Effect |
 | --- | --- | --- |
