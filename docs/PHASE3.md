@@ -191,10 +191,39 @@ and hover shows what it has.
 | End to end: the normal form of `ack three (suc eight)` and auto with a 10 s limit (fixture `Search.agda`) are offered as cancellable, and stop after a cancel (in 52 ms and 5 ms); a cancel with another token, or after the end, does nothing; afterwards a hover and a normal form get their own answers | passes; fails when the stop sends nothing, when it ignores the token, or when the normal form does not say it stopped |
 | The goal test: the normal form's progress has the title "Agda: normal form of ?3", and can be cancelled | passes |
 
+## Done: stopping a load
+
+A load can be stopped the same way: its progress, "Agda: checking A.agda",
+is cancellable too, and the cancel sends `Cmd_abort`.
+
+1. **What Agda does** (checked with Agda 2.8.0.2, with `SlowLoad.agda`,
+   whose load takes about 2.6 s): it stops within 60 ms, and answers the
+   load with `DoneAborting` and its prompt, as for a normal form. Then it has
+   no file loaded, also not the one it had before: a goal command for a
+   file, the stopped one or the one loaded before, then took as long as a
+   whole load, and the next one was at once. So Agda loads a file first when
+   it gets a goal command for it, without saying so.
+2. **What the bridge does.** It takes Agda's file to be none, so it sends no
+   goal command for any file until the next load: hover and the goal
+   commands say "This file is not loaded in Agda yet. Save it to load it.",
+   instead of starting a hidden load. It changes nothing of the last load:
+   goals, diagnostics, highlighting and Agda's kept answers stay, and hover
+   shows those answers as before. The output file says "Stopped checking
+   A.agda. Save it to load it again.", and saving loads the file, also when
+   its text is the one Agda loaded last.
+
+| Check | Result |
+| --- | --- |
+| End to end: a load after saving a change is cancellable, with the title "Agda: checking SlowLoad.agda", and stops after a cancel (in under 1 s); the diagnostics stay; hover on the goal shows the kept answer, and on a name Agda was not asked about shows nothing, both at once; saving again loads the file, and the name then has its type | passes; fails when the bridge keeps Agda's file (the name then shows its type, after a hidden load), when it takes the stopped load for a load, or when the load cannot be stopped |
+
+A test that changed with it: `completes_unicode_input` waited for any
+notification after a wrong setting, and sometimes got the earlier one that
+Agda cannot start (the test has no Agda), which comes late from loading the
+file. It now waits for the one about the setting; it failed once in five
+runs before, and passed ten runs out of ten after.
+
 ## Possible next steps
 
 - **Ask for every goal after a load**, in the background, so that even the
   first hover on a goal is instant. It costs Agda one command per goal after
   every save.
-- **Stop a load** the same way. Not checked yet: what Agda then knows of the
-  file, and what the bridge should show.

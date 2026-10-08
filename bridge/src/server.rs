@@ -582,13 +582,15 @@ impl Bridge {
             .to_string_lossy()
             .to_string();
         self.set_reloading(path, true);
-        let progress = self.begin_progress(&format!("checking {name}")).await;
+        let command = iotcm::load(path, &self.settings().extra_args);
         let result = self
-            .run(&mut guard, &iotcm::load(path, &self.settings().extra_args))
+            .run_long(
+                &mut guard,
+                path,
+                &command,
+                &format!("Agda: checking {name}"),
+            )
             .await;
-        if let Some(progress) = progress {
-            progress.finish().await;
-        }
         let outcome = match result {
             Ok(responses) => Outcome::collect(responses),
             Err(message) => {
@@ -596,6 +598,20 @@ impl Bridge {
                 return Err(message);
             }
         };
+        if outcome.aborted {
+            // A stopped load leaves Agda without a file, and Agda then loads
+            // a file first when it gets a goal command for it (checked with
+            // Agda 2.8.0.2): no such command until the next load. Goals,
+            // diagnostics and answers stay those of the last load.
+            if let Some(session) = guard.as_mut() {
+                session.current_file = None;
+            }
+            drop(guard);
+            self.set_reloading(path, false);
+            let markdown = format!("Stopped checking {name}. Save it to load it again.\n");
+            self.show_output("Load", path, &markdown).await;
+            return Ok(format!("Stopped checking {name}."));
+        }
         if let Some(session) = guard.as_mut() {
             session.current_file = Some(path.to_path_buf());
             session.helper_made = false;
@@ -1420,29 +1436,6 @@ impl Bridge {
             .begin()
             .await;
         Some((key, progress))
-    }
-
-    async fn begin_progress(
-        &self,
-        message: &str,
-    ) -> Option<
-        tower_lsp_server::OngoingProgress<
-            tower_lsp_server::Unbounded,
-            tower_lsp_server::NotCancellable,
-        >,
-    > {
-        let token = ProgressToken::String(format!("agda-bridge/{}", self.client.next_request_id()));
-        self.client
-            .create_work_done_progress(token.clone())
-            .await
-            .ok()?;
-        Some(
-            self.client
-                .progress(token, "Agda")
-                .with_message(message)
-                .begin()
-                .await,
-        )
     }
 
     /// Where the name of `link` in the document at `path` is defined: a file

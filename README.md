@@ -123,10 +123,12 @@ number. Save between two helper functions too: until Agda loads the file
 again, Agda 2.8 gives the second one the names of the first, so the bridge
 waits for it.
 
-A normal form, or auto with a longer time limit in the goal's text (as
-`{! -t 10000 !}`), can take long. Zed then shows it in the status bar, as
-"Agda: normal form of ?0"; to stop it, click it there and choose "Cancel",
-or run `editor: cancel language server work`.
+A load, a normal form, or auto with a longer time limit in the goal's text
+(as `{! -t 10000 !}`), can take long. Zed then shows it in the status bar, as
+"Agda: checking A.agda" or "Agda: normal form of ?0"; to stop it, click it
+there and choose "Cancel", or run `editor: cancel language server work`.
+After a stopped load, Agda has no file loaded: goals and diagnostics stay
+those of the last load, and saving loads the file again.
 
 ### Moving between goals
 

@@ -964,14 +964,14 @@ fn completes_unicode_input() {
     assert_eq!(result["items"][0]["textEdit"]["newText"], "→");
     client.received.clear();
     configure(&mut client, json!({ "symbolInput": "tex" }));
-    let message = client.wait_for("showMessage", |m| m["method"] == "window/showMessage");
-    assert!(
-        message["params"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("symbolInput"),
-        "{message}"
-    );
+    // Not any message: that Agda cannot start (it is not there) may come
+    // late, from loading the file.
+    client.wait_for("showMessage", |m| {
+        m["method"] == "window/showMessage"
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("symbolInput"))
+    });
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);
     let _ = client.child.wait();
@@ -1625,6 +1625,92 @@ fn stops_long_commands() {
     assert!(wait_for_output(&output, "Stopped auto on ?0.").contains("Stopped auto on ?0."));
     let hover = client.hover(&search_uri, position_of(&search_text, "{!", 0));
     assert!(hover.contains("m : ℕ"), "{hover}");
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stops_a_load() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("stop-load", &["SlowLoad.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize(&root, &agda);
+    let output = root.join(".zed/agda-output.md");
+    let file = root.join("SlowLoad.agda");
+    let file_uri = uri(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": file_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    client.diagnostics(&file_uri, |d| d.len() == 1);
+    let goal = position_of(&text, "{!  !}", 0);
+    let expected = client.hover(&file_uri, goal.clone());
+    assert!(expected.contains("n : ℕ"), "{expected}");
+
+    // Saving a change loads the file again, for seconds; Zed's cancel stops
+    // that at once.
+    let changed = format!("{text}\n-- changed\n");
+    std::fs::write(&file, &changed).unwrap();
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": file_uri, "version": 2 },
+                "contentChanges": [{ "text": changed }] }),
+    );
+    client.received.clear();
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": file_uri } }),
+    );
+    let begin = client.wait_for("progress", |m| {
+        m["method"] == "$/progress" && m["params"]["value"]["kind"] == "begin"
+    });
+    assert_eq!(
+        begin["params"]["value"]["title"],
+        "Agda: checking SlowLoad.agda"
+    );
+    let took = cancel(&mut client, &begin["params"]["token"]);
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    let stopped = "Stopped checking SlowLoad.agda. Save it to load it again.";
+    assert!(wait_for_output(&output, stopped).contains(stopped));
+
+    // The goals, diagnostics and answers of the last load stay. A hover
+    // asks Agda nothing, which would load the file first: one on a name
+    // Agda was not asked about returns at once, without a type.
+    assert!(
+        !client
+            .received
+            .iter()
+            .any(|m| m["method"] == "textDocument/publishDiagnostics"),
+        "the diagnostics changed"
+    );
+    let start = std::time::Instant::now();
+    assert_eq!(client.hover(&file_uri, goal.clone()), expected);
+    assert_eq!(client.hover(&file_uri, position_of(&changed, "ack", 1)), "");
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        start.elapsed()
+    );
+
+    // Saving again, also without a change, loads the file.
+    client.received.clear();
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": file_uri } }),
+    );
+    client.diagnostics(&file_uri, |d| d.len() == 1);
+    assert!(
+        client
+            .hover(&file_uri, position_of(&changed, "ack", 1))
+            .contains("ack : ℕ → ℕ → ℕ")
+    );
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);
