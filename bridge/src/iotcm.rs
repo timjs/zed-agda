@@ -175,6 +175,12 @@ pub fn why_in_scope_toplevel(file: &Path, name: &str) -> String {
     )
 }
 
+/// `Cmd_abort`: stop the command Agda works on. Agda reads it while it works,
+/// and ignores it when it is idle.
+pub fn abort(file: &Path) -> String {
+    iotcm(file, "Cmd_abort")
+}
+
 /// `Cmd_metas AsIs`: all goals with their types, as a load lists them
 /// (Emacs's "show goals", which also asks `AsIs`).
 pub fn metas(file: &Path) -> String {
@@ -237,6 +243,7 @@ mod tests {
         );
         assert_eq!(solve_all(file), envelope("Cmd_solveAll AsIs"));
         assert_eq!(metas(file), envelope("Cmd_metas AsIs"));
+        assert_eq!(abort(file), envelope("Cmd_abort"));
         assert_eq!(
             goal_type_context_infer(file, 2, "n + n"),
             envelope(r#"Cmd_goal_type_context_infer Simplified 2 noRange "n + n""#)

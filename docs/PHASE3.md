@@ -147,12 +147,54 @@ there is none, together with that text.
 | End to end (`Depends.agda`): after auto fills `?0` with `ℕ`, the diagnostic and the hover of `?1` say `ℕ` instead of the meta | passes |
 | Seven mutations: no cache hit; a cache that ignores the text; no clearing after a give; no `Cmd_metas` after auto; no fallback while busy; the reload flag ignored, or never set | each fails at least one of these tests |
 
+## Done: stopping a long command
+
+The normal form, and auto, which runs as long as the time limit in the
+goal's text says, can take long. While they run, other goal commands wait,
+and hover shows what it has.
+
+1. **In Zed.** The bridge marks their progress as cancellable. Zed then
+   offers to cancel it in two places (checked in Zed's source): clicking the
+   progress in the status bar opens a menu with "Cancel …"
+   (`crates/activity_indicator/src/activity_indicator.rs`), and the command
+   `editor: cancel language server work` cancels the work for the active
+   file (`CancelLanguageServerWork` in `crates/editor`). An extension cannot
+   add a command of its own to the command palette, but this one is Zed's,
+   and can be bound to a key. Both send `window/workDoneProgress/cancel`
+   with the progress's token (`cancel_language_server_work` in
+   `crates/project/src/lsp_store.rs`). tower-lsp-server 0.23 does not handle
+   that notification yet (a `TODO` in its `src/server.rs`), so the bridge
+   registers it with `custom_method`.
+2. **The title.** Zed shows "title: message" in the status bar, but only
+   "Cancel title" in its menu, so the title says everything: "Agda: normal
+   form of ?0", "Agda: auto on ?3".
+3. **In Agda.** `Cmd_abort` stops the command Agda works on: Agda reads it
+   while it works, and answers the stopped command with
+   `{"kind":"DoneAborting"}` and its prompt (checked with Agda 2.8.0.2, on
+   the normal form of `ack 3 9`, about 10 s, and on auto with
+   `-t 10000 trans sym cong +-zero +-suc` for `n + m ≡ m + n`, which was
+   still searching after 40 s). `Cmd_abort` itself gets no answer and no
+   prompt, also when Agda is idle, so it is not counted as a command (see
+   "commands that survive a cancelled request").
+4. **In the bridge.** The command holds Agda's session, so the cancel cannot
+   wait for it: Agda's input has a lock of its own, which a `Stopper` shares
+   (`agda.rs`). It sends `Cmd_abort` only while Agda works on the command
+   of that token: the token is set when its whole line is written, and
+   cleared when its prompt is read or the next command is written. A late
+   cancel, or one with another token, does nothing.
+5. **Afterwards** the output file says "Stopped computing the normal form of
+   `…` in ?0." or "Stopped auto on ?0.", and nothing changes in the file.
+
+| Check | Result |
+| --- | --- |
+| Agda's `DoneAborting` is read; `Cmd_abort` is built | passes |
+| End to end: the normal form of `ack three (suc eight)` and auto with a 10 s limit (fixture `Search.agda`) are offered as cancellable, and stop after a cancel (in 52 ms and 5 ms); a cancel with another token, or after the end, does nothing; afterwards a hover and a normal form get their own answers | passes; fails when the stop sends nothing, when it ignores the token, or when the normal form does not say it stopped |
+| The goal test: the normal form's progress has the title "Agda: normal form of ?3", and can be cancelled | passes |
+
 ## Possible next steps
 
 - **Ask for every goal after a load**, in the background, so that even the
   first hover on a goal is instant. It costs Agda one command per goal after
   every save.
-- **Stop a long command,** such as a normal form that takes too long, with
-  Agda's `Cmd_abort`, so that hovers get Agda's answers again at once. Not
-  checked yet: whether Agda 2.8 handles it while it works on another
-  command.
+- **Stop a load** the same way. Not checked yet: what Agda then knows of the
+  file, and what the bridge should show.

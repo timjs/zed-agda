@@ -14,7 +14,7 @@ use tower_lsp_server::jsonrpc::Result as RpcResult;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
-use crate::agda::Agda;
+use crate::agda::{Agda, Stop, Stopper};
 use crate::goals::{self, GOAL_MARKER, Goal};
 use crate::highlight::{self, Span};
 use crate::links::{self, Link, Target};
@@ -64,7 +64,10 @@ fn is_agda_source(path: &Path) -> bool {
 }
 
 pub async fn run() {
-    let (service, socket) = LspService::new(|client| Backend(Arc::new(Bridge::new(client))));
+    // tower-lsp-server does not handle Zed's cancel of a progress itself yet.
+    let (service, socket) = LspService::build(|client| Backend(Arc::new(Bridge::new(client))))
+        .custom_method("window/workDoneProgress/cancel", Backend::cancel_progress)
+        .finish();
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .concurrency_level(16)
         .serve(service)
@@ -216,6 +219,9 @@ pub struct Bridge {
     output: Mutex<Option<Arc<Output>>>,
     documents: Mutex<HashMap<PathBuf, Document>>,
     session: AsyncMutex<Option<Session>>,
+    /// Stops a long command of the running Agda, without its session lock,
+    /// which the command holds.
+    stopper: Mutex<Option<Stopper>>,
 }
 
 /// Everything one Agda command answered, sorted by purpose.
@@ -233,6 +239,8 @@ struct Outcome {
     solutions: Option<Vec<Solution>>,
     /// What auto said when it found nothing.
     auto: Option<String>,
+    /// Whether the command was stopped with `Cmd_abort`.
+    aborted: bool,
     /// The type Agda inferred for an expression.
     inferred: Option<String>,
     /// How a name is in scope.
@@ -304,6 +312,7 @@ impl Outcome {
                         .highlighting
                         .extend(info.into_iter().flat_map(|info| info.payload));
                 }
+                Response::DoneAborting => outcome.aborted = true,
                 Response::Other => {}
             }
         }
@@ -389,6 +398,7 @@ impl Bridge {
             output: Mutex::new(None),
             documents: Mutex::new(HashMap::new()),
             session: AsyncMutex::new(None),
+            stopper: Mutex::new(None),
         }
     }
 
@@ -463,6 +473,7 @@ impl Bridge {
             let agda = Agda::spawn(&settings.agda_path, &settings.extra_args)
                 .await
                 .map_err(|err| format!("{err}. Set `lsp.agda-bridge.settings.agdaPath` in Zed."))?;
+            *self.stopper.lock().unwrap() = Some(agda.stopper());
             *guard = Some(Session {
                 agda,
                 current_file: None,
@@ -480,6 +491,33 @@ impl Bridge {
         tokio::time::timeout(BRIEF_WAIT, self.session.lock())
             .await
             .ok()
+    }
+
+    /// Run a command that may take long, such as a normal form, with a
+    /// progress titled `title` that Zed offers to cancel: in the status bar,
+    /// and with `editor: cancel language server work`. Cancelling it stops
+    /// the command, which Agda then answers with `DoneAborting`.
+    async fn run_long(
+        &self,
+        guard: &mut MutexGuard<'_, Option<Session>>,
+        path: &Path,
+        command: &str,
+        title: &str,
+    ) -> Result<Vec<Response>, String> {
+        let Some((key, progress)) = self.begin_stoppable_progress(title).await else {
+            return self.run(guard, command).await;
+        };
+        let stop = Stop {
+            key,
+            abort: iotcm::abort(path),
+        };
+        let session = guard.as_mut().expect("session started");
+        let result = session.agda.run_stoppable(command, stop).await;
+        progress.finish().await;
+        result.map_err(|err| {
+            **guard = None;
+            format!("Agda stopped: {err}")
+        })
     }
 
     /// Run one command; a dead Agda is dropped so the next command restarts it.
@@ -748,16 +786,27 @@ impl Bridge {
         let mut guard = self.lock_session().await?;
         Self::check_current(&guard, path)?;
         // Computing can take long, unlike the other goal commands.
-        let progress = self
-            .begin_progress(&format!("computing the normal form in ?{id}"))
-            .await;
-        let result = self.run(&mut guard, &iotcm::compute(path, id, &text)).await;
-        if let Some(progress) = progress {
-            progress.finish().await;
-        }
-        let outcome = Outcome::collect(result?);
+        let responses = self
+            .run_long(
+                &mut guard,
+                path,
+                &iotcm::compute(path, id, &text),
+                &format!("Agda: normal form of ?{id}"),
+            )
+            .await?;
+        let outcome = Outcome::collect(responses);
         drop(guard);
         let title = format!("Normal form of ?{id}");
+        if outcome.aborted {
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            self.show_output(
+                &title,
+                path,
+                &format!("Stopped computing the normal form of `{text}` in ?{id}.\n"),
+            )
+            .await;
+            return Ok(format!("Stopped the normal form of ?{id}."));
+        }
         match &outcome.goal_info {
             Some((id, GoalInfo::NormalForm { expr })) => {
                 self.show_output(&title, path, &render::normal_form(*id, Some(&text), expr))
@@ -867,7 +916,15 @@ impl Bridge {
             GoalCommand::Refine => iotcm::refine(path, id, &expression),
             GoalCommand::Auto => iotcm::auto_one(path, id, &expression),
         };
-        let mut outcome = Outcome::collect(self.run(&mut guard, &request).await?);
+        // Auto can take long, when the goal's text sets a longer time limit.
+        let responses = match command {
+            GoalCommand::Auto => {
+                let title = format!("Agda: auto on ?{id}");
+                self.run_long(&mut guard, path, &request, &title).await?
+            }
+            _ => self.run(&mut guard, &request).await?,
+        };
+        let mut outcome = Outcome::collect(responses);
         // Auto sends no new list of goals, though filling one goal can change
         // the types of others: ask for it, as Emacs's "show goals" does.
         if outcome.give.is_some() && !outcome.goals_listed {
@@ -880,6 +937,15 @@ impl Bridge {
         drop(guard);
 
         let title = command.title();
+        if outcome.aborted {
+            self.show_output(
+                &format!("{title} ?{id}"),
+                path,
+                &format!("Stopped {} on ?{id}.\n", title.to_lowercase()),
+            )
+            .await;
+            return Ok(format!("Stopped {} on goal ?{id}.", title.to_lowercase()));
+        }
         if outcome.give.is_none() {
             self.show_output(&format!("{title} ?{id}"), path, &outcome.markdown())
                 .await;
@@ -1328,6 +1394,34 @@ impl Bridge {
         }
     }
 
+    /// A progress that Zed offers to cancel, with its token as a string.
+    /// Everything is in the title: Zed shows "title: message" in the status
+    /// bar, but only "Cancel title" in its menu.
+    async fn begin_stoppable_progress(
+        &self,
+        title: &str,
+    ) -> Option<(
+        String,
+        tower_lsp_server::OngoingProgress<
+            tower_lsp_server::Unbounded,
+            tower_lsp_server::Cancellable,
+        >,
+    )> {
+        let key = format!("agda-bridge/{}", self.client.next_request_id());
+        let token = ProgressToken::String(key.clone());
+        self.client
+            .create_work_done_progress(token.clone())
+            .await
+            .ok()?;
+        let progress = self
+            .client
+            .progress(token, title)
+            .with_cancel_button()
+            .begin()
+            .await;
+        Some((key, progress))
+    }
+
     async fn begin_progress(
         &self,
         message: &str,
@@ -1603,6 +1697,23 @@ impl Bridge {
 }
 
 pub struct Backend(pub Arc<Bridge>);
+
+impl Backend {
+    /// Zed cancels a progress the bridge offered to cancel: stop the command
+    /// it is for, if Agda still works on it.
+    async fn cancel_progress(&self, params: WorkDoneProgressCancelParams) {
+        let key = match params.token {
+            ProgressToken::String(key) => key,
+            ProgressToken::Number(key) => key.to_string(),
+        };
+        let stopper = self.0.stopper.lock().unwrap().clone();
+        if let Some(stopper) = stopper
+            && let Err(err) = stopper.stop(&key).await
+        {
+            eprintln!("agda-bridge: cannot stop Agda: {err}");
+        }
+    }
+}
 
 fn path_of(uri: &Uri) -> Option<PathBuf> {
     uri.to_file_path().map(|path| path.into_owned())

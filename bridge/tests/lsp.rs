@@ -115,10 +115,20 @@ impl Client {
 
     /// Receive one message, answering requests from the server like Zed does.
     fn receive(&mut self) -> Value {
-        let message = self
-            .incoming
-            .recv_timeout(TIMEOUT)
-            .expect("message from agda-bridge");
+        self.receive_within(TIMEOUT)
+            .expect("message from agda-bridge")
+    }
+
+    /// Keep receiving messages for `duration`, as Zed would.
+    fn receive_for(&mut self, duration: Duration) {
+        let end = std::time::Instant::now() + duration;
+        while let Some(left) = end.checked_duration_since(std::time::Instant::now())
+            && self.receive_within(left).is_some()
+        {}
+    }
+
+    fn receive_within(&mut self, timeout: Duration) -> Option<Value> {
+        let message = self.incoming.recv_timeout(timeout).ok()?;
         if let (Some(id), Some(method)) = (
             message.get("id"),
             message.get("method").and_then(Value::as_str),
@@ -135,7 +145,7 @@ impl Client {
             self.received.push(message.clone());
             self.history.push(message.clone());
         }
-        message
+        Some(message)
     }
 
     fn request(&mut self, method: &str, params: Value) -> Value {
@@ -1099,7 +1109,8 @@ fn goal_commands() {
         "workspace/executeCommand",
         json!({ "command": "agda.normalForm", "arguments": [goals_uri, 3] }),
     );
-    // Computing shows progress, which Zed is asked to create first.
+    // Computing shows progress, which Zed is asked to create first, and
+    // offers to cancel.
     let end = client.wait_for("progress", |m| {
         m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"
     });
@@ -1108,10 +1119,9 @@ fn goal_commands() {
             && m["params"]["token"] == end["params"]["token"]
             && m["params"]["value"]["kind"] == "begin"
     });
-    assert_eq!(
-        begin.unwrap()["params"]["value"]["message"],
-        "computing the normal form in ?3"
-    );
+    let begin = &begin.unwrap()["params"]["value"];
+    assert_eq!(begin["title"], "Agda: normal form of ?3");
+    assert_eq!(begin["cancellable"], true);
     let normal = "**Normal form of `id (suc x)` in ?3**\n\n```agda\nsuc x\n```\n";
     let written = wait_for_output(&output, normal);
     assert!(written.contains(normal), "{written}");
@@ -1497,6 +1507,124 @@ fn hover_while_agda_loads_again() {
     // After the load, Agda's new answer, without the note.
     client.diagnostics(&file_uri, |d| d.len() == 1);
     assert_eq!(client.hover(&file_uri, goal), expected);
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    let _ = client.child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Start a long goal command, and return the token of its progress, once
+/// it began.
+fn start_long(client: &mut Client, command: &str, uri: &str, goal: u32) -> Value {
+    client.received.clear();
+    client.request(
+        "workspace/executeCommand",
+        json!({ "command": command, "arguments": [uri, goal] }),
+    );
+    let begin = client.wait_for("progress", |m| {
+        m["method"] == "$/progress" && m["params"]["value"]["kind"] == "begin"
+    });
+    assert_eq!(begin["params"]["value"]["cancellable"], true, "{begin}");
+    begin["params"]["token"].clone()
+}
+
+/// Cancel a progress as Zed does, and return how long its command then
+/// took to end.
+fn cancel(client: &mut Client, token: &Value) -> Duration {
+    let start = std::time::Instant::now();
+    client.notify("window/workDoneProgress/cancel", json!({ "token": token }));
+    client.wait_for("progress", |m| {
+        m["method"] == "$/progress"
+            && m["params"]["token"] == *token
+            && m["params"]["value"]["kind"] == "end"
+    });
+    start.elapsed()
+}
+
+#[test]
+fn stops_long_commands() {
+    let Some(agda) = find_agda() else {
+        eprintln!("skipping: no Agda found (set $AGDA or put agda on PATH)");
+        return;
+    };
+    let root = setup("stop", &["Slow.agda", "Search.agda"]);
+    let mut client = Client::start(&root.join("bridge.sock"));
+    client.initialize(&root, &agda);
+    let output = root.join(".zed/agda-output.md");
+    let slow = root.join("Slow.agda");
+    let slow_uri = uri(&slow);
+    let mut text = std::fs::read_to_string(&slow).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": slow_uri, "languageId": "agda", "version": 1, "text": text } }),
+    );
+    client.diagnostics(&slow_uri, |d| d.len() == 3);
+
+    // The normal form of `ack three (suc eight)` takes about 10 s. A cancel
+    // with another token leaves it; Zed's cancel stops it at once.
+    text = text.replacen("ack three eight", "ack three (suc eight)", 1);
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": slow_uri, "version": 2 },
+                "contentChanges": [{ "text": text }] }),
+    );
+    let token = start_long(&mut client, "agda.normalForm", &slow_uri, 0);
+    client.notify(
+        "window/workDoneProgress/cancel",
+        json!({ "token": "agda-bridge/other" }),
+    );
+    client.receive_for(Duration::from_millis(500));
+    assert!(
+        !client
+            .received
+            .iter()
+            .any(|m| m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"),
+        "another token stopped it"
+    );
+    let took = cancel(&mut client, &token);
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    let stopped = "Stopped computing the normal form of `ack three (suc eight)` in ?0.";
+    assert!(wait_for_output(&output, stopped).contains(stopped));
+
+    // A cancel after the end does nothing, and Agda answers the next
+    // commands as before: the goal not hovered yet, and a quick normal form.
+    client.notify("window/workDoneProgress/cancel", json!({ "token": token }));
+    assert!(
+        client
+            .hover(&slow_uri, position_of(&text, "{!  !}", 1))
+            .contains("m : ℕ")
+    );
+    text = text.replacen("ack three (suc eight)", "ack zero zero", 1);
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": slow_uri, "version": 3 },
+                "contentChanges": [{ "text": text }] }),
+    );
+    let token = start_long(&mut client, "agda.normalForm", &slow_uri, 0);
+    client.wait_for("progress", |m| {
+        m["method"] == "$/progress"
+            && m["params"]["token"] == token
+            && m["params"]["value"]["kind"] == "end"
+    });
+    let normal = "**Normal form of `ack zero zero` in ?0**\n\n```agda\nsuc zero\n```\n";
+    assert!(wait_for_output(&output, normal).contains(normal));
+
+    // Auto with a time limit of 10 s, on a goal it cannot fill, stops too.
+    let search = root.join("Search.agda");
+    let search_uri = uri(&search);
+    let search_text = std::fs::read_to_string(&search).unwrap();
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": search_uri, "languageId": "agda", "version": 1, "text": search_text } }),
+    );
+    client.diagnostics(&search_uri, |d| d.len() == 1);
+    let token = start_long(&mut client, "agda.auto", &search_uri, 0);
+    let took = cancel(&mut client, &token);
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(wait_for_output(&output, "Stopped auto on ?0.").contains("Stopped auto on ?0."));
+    let hover = client.hover(&search_uri, position_of(&search_text, "{!", 0));
+    assert!(hover.contains("m : ℕ"), "{hover}");
 
     client.request("shutdown", Value::Null);
     client.notify("exit", Value::Null);

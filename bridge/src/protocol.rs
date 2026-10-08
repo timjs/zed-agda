@@ -82,6 +82,8 @@ pub enum Response {
     HighlightingInfo {
         info: Option<Highlighting>,
     },
+    /// The answer to a command stopped with `Cmd_abort`, before its prompt.
+    DoneAborting,
     /// Everything else, such as `Status`, `RunningInfo` and `JumpToError`.
     #[serde(other)]
     Other,
@@ -359,6 +361,11 @@ mod tests {
 
         let status = r#"{"kind":"Status","status":{"checked":false}}"#;
         assert!(matches!(parse_line(status).unwrap(), Response::Other));
+        let aborted = r#"{"kind":"DoneAborting"}"#;
+        assert!(matches!(
+            parse_line(aborted).unwrap(),
+            Response::DoneAborting
+        ));
 
         // Shortened from Agda 2.8.0's answer when loading `Uses.agda`.
         let highlighting = r#"{"direct":true,"info":{"payload":[{"atoms":["keyword"],"definitionSite":null,"note":"","range":[1,7],"tokenBased":"TokenBased"},{"atoms":["datatype"],"definitionSite":{"filepath":"/x/Nat.agda","position":24},"note":"","range":[43,44],"tokenBased":"NotOnlyTokenBased"}],"remove":false},"kind":"HighlightingInfo"}"#;
