@@ -1,6 +1,6 @@
 id = "agda"
 name = "Agda"
-version = "0.2.1"
+version = "0.3.0"
 schema_version = 1
 authors = ["Haohan Yang yanghaohanmail@gmail.com"]
 description = "Agda support."
@@ -10,6 +10,6 @@ repository = "https://github.com/haohanyang/agda-zed"
 repository = "https://github.com/tree-sitter/tree-sitter-agda"
 rev = "e8d47a6987effe34d5595baf321d82d3519a8527"
 
-[language_servers.als]
-name = "Agda Language Server"
+[language_servers.agda-bridge]
+name = "Agda Bridge"
 languages = ["Agda"]

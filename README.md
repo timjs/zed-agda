@@ -3,29 +3,20 @@
 An [Agda](https://agda.readthedocs.io/en/latest/getting-started/what-is-agda.html) extension for [Zed](https://zed.dev). Credits to:
 
 - Tree-sitter: [tree-sitter-agda](https://github.com/tree-sitter/tree-sitter-agda)
-- Language Server: [Agda Language Server](https://github.com/agda/agda-language-server)
+- Language server: [agda-bridge](https://github.com/timjs/agda-bridge)
+
+The extension starts [agda-bridge](https://github.com/timjs/agda-bridge), a
+language server that drives Agda through its own `--interaction-json`
+protocol, as Emacs's `agda2-mode` does. Its README explains how to install,
+configure and use it.
 
 ## Installation
 
-This extension requires both the Agda compiler and the Agda Language Server (ALS) to be installed on your system.
-First, ensure you have the Agda Standard Library and the Language Server installed. I recommend using stack to ensure compatibility with your system's GHC version.
+You need Agda itself, and Rust to build agda-bridge:
 
 ```sh
-git clone https://github.com/agda/agda-language-server.git
-cd agda-language-server
-stack install
+cargo install --locked --git https://github.com/timjs/agda-bridge
 ```
 
-## Configuration
-
-By default, the extension looks for `als` in your system `PATH`. If you want to use a specific binary, you can configure it in your Zed `settings.json`:
-
-```json
-"lsp": {
-  "als": {
-    "binary": {
-      "path": "/path/to/your/als"
-    }
-  }
-}
-```
+Then install this repository in Zed with "Install Dev Extension" on the
+Extensions page.
