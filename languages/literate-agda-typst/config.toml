@@ -1,0 +1,27 @@
+# Literate Agda in Typst: the prose is Typst, the code blocks Agda. The
+# settings below `scope_opt_in_language_servers` are the Typst extension's
+# (https://github.com/WeetHet/typst.zed, commit 289ce59, Apache License 2.0).
+name = "Literate Agda (Typst)"
+grammar = "typst"
+path_suffixes = ["lagda.typ"]
+# agda-bridge only gets completions, hover and code actions inside the Agda
+# blocks, which are Agda's own scope, never in the prose.
+scope_opt_in_language_servers = ["agda-bridge"]
+
+line_comments = ["// "]
+documentation_comment = { start = "/*", prefix = "* ", end = "*/", tab_size = 1 }
+tab_size = 2
+soft_wrap = "editor_width"
+brackets = [
+	{ start = "/*", end = " */", close = true, newline = true, not_in = ["string", "comment"] },
+    { start = "(", end = ")", close = true, newline = true },
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "$", end = "$", close = true, newline = true },
+    { start = "`", end = "`", close = true, newline = false, surround = true },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+    { start = "*", end = "*", close = true, newline = false, surround = true, not_in = ["string", "math"] },
+    { start = "_", end = "_", close = true, newline = false, surround = true, not_in = ["string", "math"] },
+]
+unordered_list = ["- ", "+ "]
+ordered_list = [{ pattern = "(\\d+)\\. ", format = "{1}. " }]

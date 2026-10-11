@@ -10,6 +10,12 @@ repository = "https://github.com/haohanyang/agda-zed"
 repository = "https://github.com/tree-sitter/tree-sitter-agda"
 rev = "e8d47a6987effe34d5595baf321d82d3519a8527"
 
+# The Typst extension pins the same commit; Zed registers a grammar by name, and
+# the same commit makes it irrelevant which extension's copy wins.
+[grammars.typst]
+repository = "https://github.com/uben0/tree-sitter-typst"
+rev = "abe60cbed7986ee475d93f816c1be287f220c5d8"
+
 [language_servers.agda-bridge]
 name = "Agda Bridge"
-languages = ["Agda"]
+languages = ["Agda", "Literate Agda (Typst)"]

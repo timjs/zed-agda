@@ -68,3 +68,16 @@ fn bridge_settings(worktree: &zed::Worktree) -> Result<serde_json::Value> {
 }
 
 zed::register_extension!(AgdaExtension);
+
+#[cfg(test)]
+mod tests {
+    /// Every language of the bridge styles its tokens the same way, so the
+    /// copies of the rules must stay identical.
+    #[test]
+    fn semantic_token_rules_are_identical() {
+        assert_eq!(
+            include_str!("../languages/agda/semantic_token_rules.json"),
+            include_str!("../languages/literate-agda-typst/semantic_token_rules.json"),
+        );
+    }
+}

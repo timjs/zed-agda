@@ -1,0 +1,34 @@
+// Styles for the token types and modifiers that agda-bridge sends (see
+// src/highlight.rs in agda-bridge). Standard types such as `function` and
+// `type` use Zed's default rules. Backgrounds follow Agda's Emacs mode, through
+// agda2-vscode's light theme colours, made translucent so they also work on
+// dark themes. Earlier rules take precedence when several modifiers apply.
+// Rules in your own settings (`global_lsp_settings.semantic_token_rules`)
+// override these.
+//
+// agda-bridge keeps the original of this file in zed/semantic_token_rules.json
+// and tests it against its legend. The zed-agda extension has an identical
+// copy in languages/agda/semantic_token_rules.json, so change both.
+[
+  { "token_type": "punctuation", "style": ["punctuation", "operator"] },
+  { "token_type": "pragma", "style": ["preproc", "keyword"] },
+
+  { "token_modifiers": ["error"], "foreground_color": "#FF0000", "underline": true },
+  { "token_modifiers": ["errorWarning"], "background_color": "#F0808059", "underline": true },
+  { "token_modifiers": ["unsolvedMeta"], "background_color": "#FFFF0040" },
+  { "token_modifiers": ["unsolvedConstraint"], "background_color": "#FFFF0040" },
+  { "token_modifiers": ["terminationProblem"], "background_color": "#FFA07A59" },
+  { "token_modifiers": ["positivityProblem"], "background_color": "#CD853F59" },
+  { "token_modifiers": ["coverageProblem"], "background_color": "#F5DEB359" },
+  { "token_modifiers": ["confluenceProblem"], "background_color": "#FFC0CB40" },
+  { "token_modifiers": ["incompletePattern"], "background_color": "#FFA50040" },
+  { "token_modifiers": ["missingDefinition"], "background_color": "#FFA50059" },
+  { "token_modifiers": ["instanceProblem"], "background_color": "#F5DEB359" },
+  { "token_modifiers": ["deadcode"], "background_color": "#80808040" },
+  { "token_modifiers": ["shadowingInTelescope"], "background_color": "#80808040" },
+  { "token_modifiers": ["catchallClause"], "background_color": "#C8C8C833" },
+  { "token_modifiers": ["cosmeticProblem"], "background_color": "#C8C8C833" },
+  { "token_modifiers": ["typeChecks"], "background_color": "#ADD8E640" },
+  { "token_modifiers": ["dottedPattern"], "font_style": "italic" },
+  { "token_modifiers": ["hole"], "background_color": "#729FCF30" }
+]
